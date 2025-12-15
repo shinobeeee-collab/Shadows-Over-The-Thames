@@ -3,40 +3,70 @@
 #include <string>
 #include <vector>
 #include <commctrl.h>
+#include <cmath>
+#include <algorithm>
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "msimg32.lib")
+
+// Структуры для игрока
+struct Player {
+    float x = 100.0f;
+    float y = 300.0f;
+    float width = 64.0f;
+    float height = 128.0f;
+    float speed = 5.0f;
+    bool facingRight = true;
+    bool isMoving = false;
+    bool isRunning = false;
+    HBITMAP hSpriteRight = nullptr;
+    HBITMAP hSpriteRunRight = nullptr;
+    int currentFrame = 0;
+    DWORD lastFrameTime = 0;
+    DWORD frameDelay = 150;
+};
 
 // Глобальные переменные
 struct WindowContext {
     HWND hWnd = nullptr;
-    HDC device_context = nullptr;
-    HDC buffer_context = nullptr;
-    HBITMAP buffer_bitmap = nullptr;
     int width = 1024;
     int height = 768;
     bool should_exit = false;
     HWND hStartButton = nullptr;
     HWND hExitButton = nullptr;
+
+    // Буфер для двойной буферизации
+    HDC hBufferDC = nullptr;
+    HBITMAP hBufferBitmap = nullptr;
+    HBITMAP hOldBufferBitmap = nullptr;
+    int bufferWidth = 0;
+    int bufferHeight = 0;
 };
 
 struct GameState {
     bool inMainMenu = true;
     bool inGame = false;
     int currentLevel = 0;
+    Player player;
+    float levelWidth = 3800;
+    float levelHeight = 768;
+    HBITMAP hLevelBackground = nullptr;
+    DWORD lastRunTime = 0;
+    DWORD boostStartTime = 0;
+    bool isRunningBoost = false;
+    float cameraX = 0;
 };
 
 WindowContext g_window;
 GameState g_gameState;
 
 // Цвета
-const COLORREF MENU_BG_COLOR = RGB(20, 25, 35); // Темный фон для меню
+const COLORREF MENU_BG_COLOR = RGB(20, 25, 35);
 const COLORREF BUTTON_COLOR = RGB(86, 98, 246);
 const COLORREF BUTTON_HOVER_COLOR = RGB(105, 116, 255);
 const COLORREF TEXT_COLOR = RGB(255, 255, 255);
 
-// Прототипы
+// Прототипы функций
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
-bool InitializeWindow(HINSTANCE hInstance, int nCmdShow);
 void CreateMainMenuButtons();
 void ShowMainMenuButtons(bool show);
 void Cleanup();
@@ -47,12 +77,82 @@ void InitLevel1();
 void RenderMainMenu(HDC hdc);
 void RenderGame(HDC hdc);
 void CustomizeButton(HWND hwndButton);
+void ProcessInput();
+void UpdatePlayer();
+void RenderPlayer(HDC hdc);
+void LimitPlayerOnGround();
+void UpdateCamera();
+void InitBuffer(HDC hdc);
+void CleanupBuffer();
+
+// Функция для зеркального отображения битмапа
+void DrawMirroredBitmap(HDC hdc, int x, int y, int width, int height,
+    HDC memDC, HBITMAP hBitmap, int srcWidth, int srcHeight)
+{
+    // Создаем временный DC для зеркального отображения
+    HDC mirrorDC = CreateCompatibleDC(hdc);
+    HBITMAP hMirrorBmp = CreateCompatibleBitmap(hdc, srcWidth, srcHeight);
+    HBITMAP hOldMirrorBmp = (HBITMAP)SelectObject(mirrorDC, hMirrorBmp);
+
+    // Копируем исходный битмап
+    HBITMAP hOldBmp = (HBITMAP)SelectObject(memDC, hBitmap);
+    BitBlt(mirrorDC, 0, 0, srcWidth, srcHeight, memDC, 0, 0, SRCCOPY);
+
+    // Зеркалим по горизонтали
+    StretchBlt(mirrorDC, srcWidth - 1, 0, -srcWidth, srcHeight,
+        mirrorDC, 0, 0, srcWidth, srcHeight, SRCCOPY);
+
+    // Рисуем на экран
+    TransparentBlt(hdc, x, y, width, height,
+        mirrorDC, 0, 0, srcWidth, srcHeight, RGB(255, 0, 255));
+
+    // Очистка
+    SelectObject(mirrorDC, hOldMirrorBmp);
+    SelectObject(memDC, hOldBmp);
+    DeleteObject(hMirrorBmp);
+    DeleteDC(mirrorDC);
+}
+
+// Инициализация буфера
+void InitBuffer(HDC hdc)
+{
+    if (g_window.hBufferDC)
+        CleanupBuffer();
+
+    g_window.hBufferDC = CreateCompatibleDC(hdc);
+    g_window.hBufferBitmap = CreateCompatibleBitmap(hdc, g_window.width, g_window.height);
+    g_window.hOldBufferBitmap = (HBITMAP)SelectObject(g_window.hBufferDC, g_window.hBufferBitmap);
+    g_window.bufferWidth = g_window.width;
+    g_window.bufferHeight = g_window.height;
+}
+
+// Очистка буфера
+void CleanupBuffer()
+{
+    if (g_window.hBufferDC)
+    {
+        if (g_window.hOldBufferBitmap)
+        {
+            SelectObject(g_window.hBufferDC, g_window.hOldBufferBitmap);
+            g_window.hOldBufferBitmap = nullptr;
+        }
+
+        if (g_window.hBufferBitmap)
+        {
+            DeleteObject(g_window.hBufferBitmap);
+            g_window.hBufferBitmap = nullptr;
+        }
+
+        DeleteDC(g_window.hBufferDC);
+        g_window.hBufferDC = nullptr;
+    }
+}
 
 // Точка входа
 int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     _In_ LPSTR lpCmdLine, _In_ int nCmdShow)
 {
-    // Инициализация Common Controls ДО создания окна
+    // Инициализация Common Controls
     INITCOMMONCONTROLSEX icc = { sizeof(INITCOMMONCONTROLSEX), ICC_STANDARD_CLASSES };
     InitCommonControlsEx(&icc);
 
@@ -66,7 +166,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
     wc.style = CS_HREDRAW | CS_VREDRAW;
-    wc.hbrBackground = CreateSolidBrush(MENU_BG_COLOR); // Фон окна
+    wc.hbrBackground = CreateSolidBrush(MENU_BG_COLOR);
 
     if (!RegisterClass(&wc))
     {
@@ -107,6 +207,9 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     ShowWindow(g_window.hWnd, nCmdShow);
     UpdateWindow(g_window.hWnd);
 
+    // Инициализация таймера для обновления игры
+    SetTimer(g_window.hWnd, 1, 16, NULL); // ~60 FPS
+
     // Основной цикл
     MSG msg = {};
     while (!g_window.should_exit)
@@ -121,8 +224,17 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
         }
         else
         {
-            // Небольшая пауза чтобы не грузить процессор
-            Sleep(10);
+            // Обработка ввода и обновление состояния игры
+            if (g_gameState.inGame)
+            {
+                ProcessInput();
+                UpdatePlayer();
+                UpdateCamera();
+                InvalidateRect(g_window.hWnd, nullptr, FALSE);
+            }
+
+            // Небольшая пауза
+            Sleep(1);
         }
     }
 
@@ -135,33 +247,33 @@ void CreateMainMenuButtons()
 {
     HINSTANCE hInstance = (HINSTANCE)GetWindowLongPtr(g_window.hWnd, GWLP_HINSTANCE);
 
-    // Стили кнопок - делаем их плоскими и современными
+    // Стили кнопок
     DWORD buttonStyle = WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON | BS_FLAT;
 
-    // Кнопка "Начать игру" - яркая и крупная
+    // Кнопка "Начать игру"
     g_window.hStartButton = CreateWindow(
         L"BUTTON",
         L"НАЧАТЬ ИГРУ",
         buttonStyle,
-        g_window.width / 2 - 150,  // Центр по горизонтали
-        g_window.height / 2 - 35,   // Выше центра
-        300, 70,                   // Ширина и высота
+        g_window.width / 2 - 150,
+        g_window.height / 2 - 35,
+        300, 70,
         g_window.hWnd,
-        (HMENU)1001,               // ID кнопки
+        (HMENU)1001,
         hInstance,
         nullptr
     );
 
-    // Кнопка "Выйти" - под первой кнопкой
+    // Кнопка "Выйти"
     g_window.hExitButton = CreateWindow(
         L"BUTTON",
         L"ВЫЙТИ",
         buttonStyle,
-        g_window.width / 2 - 100,   // Центр по горизонтали
-        g_window.height / 2 + 55,   // Ниже первой кнопки
-        200, 50,                   // Ширина и высота
+        g_window.width / 2 - 100,
+        g_window.height / 2 + 55,
+        200, 50,
         g_window.hWnd,
-        (HMENU)1002,               // ID кнопки
+        (HMENU)1002,
         hInstance,
         nullptr
     );
@@ -174,22 +286,21 @@ void CreateMainMenuButtons()
 // Кастомизация внешнего вида кнопки
 void CustomizeButton(HWND hwndButton)
 {
-    // Устанавливаем современный шрифт
     HFONT hFont = CreateFont(
-        24,                        // Высота
-        0,                         // Ширина
-        0,                         // Угол наклона
-        0,                         // Ориентация
-        FW_BOLD,                   // Жирный
-        FALSE,                     // Не курсив
-        FALSE,                     // Не подчеркнутый
-        FALSE,                     // Не зачеркнутый
-        DEFAULT_CHARSET,           // Кодировка
+        24,
+        0,
+        0,
+        0,
+        FW_BOLD,
+        FALSE,
+        FALSE,
+        FALSE,
+        DEFAULT_CHARSET,
         OUT_DEFAULT_PRECIS,
         CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY,         // Качество отображения
+        CLEARTYPE_QUALITY,
         DEFAULT_PITCH | FF_DONTCARE,
-        L"Segoe UI"                // Современный шрифт
+        L"Segoe UI"
     );
 
     if (hFont)
@@ -197,7 +308,6 @@ void CustomizeButton(HWND hwndButton)
         SendMessage(hwndButton, WM_SETFONT, (WPARAM)hFont, TRUE);
     }
 
-    // Делаем кнопку непрозрачной
     SetWindowLongPtr(hwndButton, GWL_EXSTYLE,
         GetWindowLongPtr(hwndButton, GWL_EXSTYLE) & ~WS_EX_TRANSPARENT);
 }
@@ -218,7 +328,6 @@ HBITMAP LoadBmpFromDebug(const char* filename)
     char exePath[MAX_PATH];
     GetModuleFileNameA(nullptr, exePath, MAX_PATH);
 
-    // Получаем путь к папке с exe
     std::string exeDir = exePath;
     size_t pos = exeDir.find_last_of("\\/");
     if (pos != std::string::npos)
@@ -226,14 +335,12 @@ HBITMAP LoadBmpFromDebug(const char* filename)
         exeDir = exeDir.substr(0, pos + 1);
     }
 
-    // Пробуем несколько возможных расположений
+    // Пробуем несколько путей
     std::string paths[] = {
-        exeDir + filename,                        // 1. В папке с exe
-        exeDir + "Debug\\" + filename,            // 2. В подпапке Debug
-        exeDir + "..\\" + filename,               // 3. На уровень выше
-        exeDir + "..\\..\\" + filename,           // 4. На два уровня выше
-        exeDir + "..\\..\\..\\" + filename,       // 5. На три уровня выше
-        filename                                   // 6. Текущая рабочая директория
+        exeDir + filename,
+        exeDir + "Debug\\" + filename,
+        exeDir + "..\\" + filename,
+        filename
     };
 
     for (const auto& fullPath : paths)
@@ -248,37 +355,39 @@ HBITMAP LoadBmpFromDebug(const char* filename)
 
         if (hBitmap)
         {
-            // Выводим отладочную информацию
             char debugMsg[512];
-            sprintf_s(debugMsg, "Файл загружен успешно: %s", fullPath.c_str());
+            sprintf_s(debugMsg, "Файл загружен: %s", fullPath.c_str());
             OutputDebugStringA(debugMsg);
-
             return hBitmap;
         }
     }
 
-    // Если файл не найден, выводим сообщение
     char debugMsg[512];
-    sprintf_s(debugMsg, "Файл не найден: %s. EXE находится в: %s",
-        filename, exeDir.c_str());
+    sprintf_s(debugMsg, "Файл не найден: %s", filename);
     OutputDebugStringA(debugMsg);
-
     return nullptr;
 }
 
-// Отрисовка главного меню (теперь принимает HDC)
+// Отрисовка главного меню с буферизацией
 void RenderMainMenu(HDC hdc)
 {
-    // Очищаем фон
+    // Инициализируем буфер если нужно
+    if (!g_window.hBufferDC || g_window.bufferWidth != g_window.width || g_window.bufferHeight != g_window.height)
+    {
+        InitBuffer(hdc);
+    }
+
+    HDC bufferDC = g_window.hBufferDC;
+
+    // Очищаем фон буфера
     HBRUSH background = CreateSolidBrush(MENU_BG_COLOR);
     RECT fullRect = { 0, 0, g_window.width, g_window.height };
-    FillRect(hdc, &fullRect, background);
+    FillRect(bufferDC, &fullRect, background);
     DeleteObject(background);
 
     // Заголовок игры
-    SetBkMode(hdc, TRANSPARENT);
+    SetBkMode(bufferDC, TRANSPARENT);
 
-    // Большой заголовок
     LOGFONT lf = {};
     lf.lfHeight = 72;
     lf.lfWeight = FW_BOLD;
@@ -286,13 +395,13 @@ void RenderMainMenu(HDC hdc)
     wcscpy_s(lf.lfFaceName, L"Georgia");
 
     HFONT titleFont = CreateFontIndirect(&lf);
-    HFONT oldFont = (HFONT)SelectObject(hdc, titleFont);
+    HFONT oldFont = (HFONT)SelectObject(bufferDC, titleFont);
 
-    SetTextColor(hdc, RGB(220, 180, 100));
+    SetTextColor(bufferDC, RGB(220, 180, 100));
 
     std::wstring title = L"SHADOWS OVER THE THAMES";
     RECT titleRect = { 0, 100, g_window.width, 250 };
-    DrawText(hdc, title.c_str(), -1, &titleRect, DT_CENTER | DT_SINGLELINE);
+    DrawText(bufferDC, title.c_str(), -1, &titleRect, DT_CENTER | DT_SINGLELINE);
 
     // Подзаголовок
     lf.lfHeight = 28;
@@ -301,83 +410,189 @@ void RenderMainMenu(HDC hdc)
     wcscpy_s(lf.lfFaceName, L"Segoe UI");
 
     HFONT subtitleFont = CreateFontIndirect(&lf);
-    SelectObject(hdc, subtitleFont);
+    SelectObject(bufferDC, subtitleFont);
 
-    SetTextColor(hdc, RGB(180, 180, 200));
+    SetTextColor(bufferDC, RGB(180, 180, 200));
 
     std::wstring subtitle = L"Приключенческая игра!";
     RECT subtitleRect = { 0, 200, g_window.width, 300 };
-    DrawText(hdc, subtitle.c_str(), -1, &subtitleRect, DT_CENTER | DT_SINGLELINE);
+    DrawText(bufferDC, subtitle.c_str(), -1, &subtitleRect, DT_CENTER | DT_SINGLELINE);
 
     // Инструкция
     lf.lfHeight = 20;
     HFONT infoFont = CreateFontIndirect(&lf);
-    SelectObject(hdc, infoFont);
+    SelectObject(bufferDC, infoFont);
 
-    SetTextColor(hdc, RGB(150, 150, 180));
+    SetTextColor(bufferDC, RGB(150, 150, 180));
 
     std::wstring info = L"Нажмите кнопку 'НАЧАТЬ ИГРУ' чтобы начать";
     RECT infoRect = { 0, g_window.height - 100, g_window.width, g_window.height - 50 };
-    DrawText(hdc, info.c_str(), -1, &infoRect, DT_CENTER | DT_SINGLELINE);
+    DrawText(bufferDC, info.c_str(), -1, &infoRect, DT_CENTER | DT_SINGLELINE);
 
     // Восстанавливаем шрифт
-    SelectObject(hdc, oldFont);
+    SelectObject(bufferDC, oldFont);
     DeleteObject(titleFont);
     DeleteObject(subtitleFont);
     DeleteObject(infoFont);
+
+    // Копируем буфер на экран
+    BitBlt(hdc, 0, 0, g_window.width, g_window.height, bufferDC, 0, 0, SRCCOPY);
 }
 
-// Отрисовка игры
+// Отрисовка игры с буферизацией
 void RenderGame(HDC hdc)
 {
-    // Очищаем фон
+    // Инициализируем буфер если нужно
+    if (!g_window.hBufferDC || g_window.bufferWidth != g_window.width || g_window.bufferHeight != g_window.height)
+    {
+        InitBuffer(hdc);
+    }
+
+    HDC bufferDC = g_window.hBufferDC;
+
+    // Очищаем фон буфера
     HBRUSH background = CreateSolidBrush(RGB(30, 30, 40));
     RECT fullRect = { 0, 0, g_window.width, g_window.height };
-    FillRect(hdc, &fullRect, background);
+    FillRect(bufferDC, &fullRect, background);
     DeleteObject(background);
 
-    // Пробуем загрузить фон уровня
-    HBITMAP hBackground = LoadBmpFromDebug("office_bg.bmp");
-    if (hBackground)
+    // Рисуем фон уровня в буфер
+    if (g_gameState.hLevelBackground)
     {
-        HDC memDC = CreateCompatibleDC(hdc);
-        HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, hBackground);
+        HDC memDC = CreateCompatibleDC(bufferDC);
+        HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, g_gameState.hLevelBackground);
 
         BITMAP bm;
-        GetObject(hBackground, sizeof(bm), &bm);
+        GetObject(g_gameState.hLevelBackground, sizeof(bm), &bm);
 
-        // Рисуем фон
-        StretchBlt(hdc, 0, 0, g_window.width, g_window.height,
-            memDC, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+        // Рисуем фон с учетом позиции камеры
+        int srcX = (int)g_gameState.cameraX;
+        srcX = max(0, min(srcX, (int)g_gameState.levelWidth - g_window.width));
+
+        StretchBlt(bufferDC, 0, 0, g_window.width, g_window.height,
+            memDC, srcX, 0, g_window.width, g_window.height, SRCCOPY);
 
         SelectObject(memDC, oldBmp);
         DeleteDC(memDC);
-        DeleteObject(hBackground);
+    }
+    else
+    {
+        // Если фон не загружен, рисуем простой
+        HBRUSH floorBrush = CreateSolidBrush(RGB(100, 70, 50));
+        RECT floorRect = { 0, g_window.height - 100, g_window.width, g_window.height };
+        FillRect(bufferDC, &floorRect, floorBrush);
+        DeleteObject(floorBrush);
     }
 
-    // Информация об уровне
-    SetBkMode(hdc, TRANSPARENT);
+    // Рисуем игрока в буфер
+    RenderPlayer(bufferDC);
+
+    // Информация об уровне в буфер
+    SetBkMode(bufferDC, TRANSPARENT);
 
     LOGFONT lf = {};
-    lf.lfHeight = 24;
+    lf.lfHeight = 20;
     lf.lfWeight = FW_BOLD;
     wcscpy_s(lf.lfFaceName, L"Arial");
 
     HFONT font = CreateFontIndirect(&lf);
-    HFONT oldFont = (HFONT)SelectObject(hdc, font);
+    HFONT oldFont = (HFONT)SelectObject(bufferDC, font);
 
-    SetTextColor(hdc, RGB(255, 255, 255));
+    SetTextColor(bufferDC, RGB(255, 255, 255));
 
-    std::wstring levelText = L"Уровень " + std::to_wstring(g_gameState.currentLevel);
-    RECT levelRect = { 20, 20, 300, 60 };
-    DrawText(hdc, levelText.c_str(), -1, &levelRect, DT_LEFT | DT_SINGLELINE);
+    // Позиция игрока (для отладки)
+    std::wstring posText = L"X: " + std::to_wstring((int)g_gameState.player.x) +
+        L" Y: " + std::to_wstring((int)g_gameState.player.y);
+    RECT posRect = { 20, 20, 300, 50 };
+    DrawText(bufferDC, posText.c_str(), -1, &posRect, DT_LEFT | DT_SINGLELINE);
 
-    std::wstring hintText = L"ESC - Вернуться в меню";
-    RECT hintRect = { g_window.width - 300, 20, g_window.width - 20, 60 };
-    DrawText(hdc, hintText.c_str(), -1, &hintRect, DT_RIGHT | DT_SINGLELINE);
+    // Подсказки управления
+    std::wstring controls = L"WASD - Движение | SHIFT - Бег | ESC - Меню";
+    RECT controlsRect = { g_window.width / 2 - 200, 20, g_window.width / 2 + 200, 50 };
+    DrawText(bufferDC, controls.c_str(), -1, &controlsRect, DT_CENTER | DT_SINGLELINE);
 
-    SelectObject(hdc, oldFont);
+    SelectObject(bufferDC, oldFont);
     DeleteObject(font);
+
+    // Копируем буфер на экран
+    BitBlt(hdc, 0, 0, g_window.width, g_window.height, bufferDC, 0, 0, SRCCOPY);
+}
+
+// Рендеринг игрока с зеркалированием
+void RenderPlayer(HDC hdc)
+{
+    // Выбираем спрайт
+    HBITMAP hSprite = g_gameState.player.isRunning ?
+        g_gameState.player.hSpriteRunRight :
+        g_gameState.player.hSpriteRight;
+
+    // Если нет спрайтов, рисуем простого человечка
+    if (!hSprite)
+    {
+        HBRUSH playerBrush = CreateSolidBrush(RGB(0, 150, 255));
+
+        // Позиция на экране с учетом камеры
+        int screenX = (int)g_gameState.player.x - (int)g_gameState.cameraX - (int)g_gameState.player.width / 2;
+        int screenY = (int)g_gameState.player.y - (int)g_gameState.player.height / 2;
+
+        RECT playerRect = {
+            screenX,
+            screenY,
+            screenX + (int)g_gameState.player.width,
+            screenY + (int)g_gameState.player.height
+        };
+
+        FillRect(hdc, &playerRect, playerBrush);
+
+        // Голова
+        RECT headRect = {
+            screenX + (int)g_gameState.player.width / 4,
+            screenY,
+            screenX + (int)g_gameState.player.width * 3 / 4,
+            screenY + (int)g_gameState.player.height / 3
+        };
+        HBRUSH headBrush = CreateSolidBrush(RGB(255, 220, 180));
+        FillRect(hdc, &headRect, headBrush);
+        DeleteObject(headBrush);
+
+        DeleteObject(playerBrush);
+    }
+    else
+    {
+        // Рисуем спрайт с зеркалированием
+        HDC memDC = CreateCompatibleDC(hdc);
+        HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, hSprite);
+
+        BITMAP bm;
+        GetObject(hSprite, sizeof(bm), &bm);
+
+        // Позиция на экране с учетом камеры
+        int screenX = (int)g_gameState.player.x - (int)g_gameState.cameraX - (int)g_gameState.player.width / 2;
+        int screenY = (int)g_gameState.player.y - (int)g_gameState.player.height / 2;
+
+        if (g_gameState.player.facingRight)
+        {
+            // Рисуем вправо (оригинальный спрайт)
+            StretchBlt(hdc,
+                screenX, screenY,
+                (int)g_gameState.player.width, (int)g_gameState.player.height,
+                memDC,
+                0, 0,
+                bm.bmWidth, bm.bmHeight,
+                SRCCOPY);
+        }
+        else
+        {
+            // Рисуем зеркально влево
+            DrawMirroredBitmap(hdc,
+                screenX, screenY,
+                (int)g_gameState.player.width, (int)g_gameState.player.height,
+                memDC, hSprite, bm.bmWidth, bm.bmHeight);
+        }
+
+        SelectObject(memDC, oldBmp);
+        DeleteDC(memDC);
+    }
 }
 
 // Начать игру
@@ -407,33 +622,126 @@ void OnExitGame()
 // Инициализация уровня 1
 void InitLevel1()
 {
-    char exePath[MAX_PATH];
-    GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+    // Загружаем фон уровня
+    g_gameState.hLevelBackground = LoadBmpFromDebug("level1.bmp");
 
-    char debugMsg[512];
-    sprintf_s(debugMsg, "Инициализация уровня 1. EXE путь: %s", exePath);
-    OutputDebugStringA(debugMsg);
+    // Загружаем спрайт игрока
+    g_gameState.player.hSpriteRight = LoadBmpFromDebug("player.bmp");
+    g_gameState.player.hSpriteRunRight = LoadBmpFromDebug("player_run.bmp");
 
-    // Проверяем доступность ресурсов
-    HBITMAP testBmp = LoadBmpFromDebug("office_bg.bmp");
-    if (!testBmp)
+    // Если нет спрайта бега, используем обычный
+    if (!g_gameState.player.hSpriteRunRight)
+        g_gameState.player.hSpriteRunRight = g_gameState.player.hSpriteRight;
+
+    // Начальная позиция игрока
+    g_gameState.player.x = 200;
+    g_gameState.player.y = g_gameState.levelHeight - 200;
+    g_gameState.player.facingRight = true;
+
+    // Сбрасываем камеру
+    g_gameState.cameraX = 0;
+}
+
+// Обработка ввода
+void ProcessInput()
+{
+    DWORD currentTime = GetTickCount64();
+
+    // Движение
+    bool moved = false;
+    if (GetAsyncKeyState('W') & 0x8000) {
+        g_gameState.player.y -= g_gameState.player.speed;
+        moved = true;
+    }
+    if (GetAsyncKeyState('S') & 0x8000) {
+        g_gameState.player.y += g_gameState.player.speed;
+        moved = true;
+    }
+    if (GetAsyncKeyState('A') & 0x8000)
     {
-        std::string errorMsg = "Ресурсы уровня не найдены!\n";
-        errorMsg += "EXE находится в: ";
-        errorMsg += exePath;
-        errorMsg += "\nПоложите office_bg.bmp в ту же папку";
+        g_gameState.player.x -= g_gameState.player.speed;
+        g_gameState.player.facingRight = false;
+        moved = true;
+    }
+    if (GetAsyncKeyState('D') & 0x8000) {
+        g_gameState.player.x += g_gameState.player.speed;
+        g_gameState.player.facingRight = true;
+        moved = true;
+    }
+    g_gameState.player.isMoving = moved;
 
-        MessageBoxA(g_window.hWnd,
-            errorMsg.c_str(),
-            "Внимание", MB_OK | MB_ICONINFORMATION);
+    // Бег
+    if (GetAsyncKeyState(VK_SHIFT) & 0x8000 && currentTime - g_gameState.lastRunTime >= 1000)
+    {
+        g_gameState.isRunningBoost = true;
+        g_gameState.boostStartTime = currentTime;
+        g_gameState.player.speed = 10;
+        g_gameState.player.isRunning = true;
+        g_gameState.lastRunTime = currentTime;
+    }
+
+    // Сброс бега через 3 секунды
+    if (g_gameState.isRunningBoost && currentTime - g_gameState.boostStartTime >= 3000)
+    {
+        g_gameState.player.speed = 5;
+        g_gameState.player.isRunning = false;
+        g_gameState.isRunningBoost = false;
+    }
+}
+
+// Обновление состояния игрока
+void UpdatePlayer()
+{
+    LimitPlayerOnGround();
+
+    // Обновление анимации
+    if (g_gameState.player.isMoving)
+    {
+        DWORD currentTime = GetTickCount64();
+        if (currentTime - g_gameState.player.lastFrameTime > g_gameState.player.frameDelay)
+        {
+            g_gameState.player.currentFrame = (g_gameState.player.currentFrame + 1) % 4;
+            g_gameState.player.lastFrameTime = currentTime;
+        }
     }
     else
     {
-        MessageBoxA(g_window.hWnd,
-            "Фон офиса успешно загружен!",
-            "Успех", MB_OK | MB_ICONINFORMATION);
-        DeleteObject(testBmp);
+        g_gameState.player.currentFrame = 0;
     }
+}
+
+// Ограничения перемещения игрока
+void LimitPlayerOnGround()
+{
+    // Левая граница уровня
+    if (g_gameState.player.x < g_gameState.player.width / 2)
+        g_gameState.player.x = g_gameState.player.width / 2;
+
+    // Правая граница уровня
+    if (g_gameState.player.x > g_gameState.levelWidth - g_gameState.player.width / 2)
+        g_gameState.player.x = g_gameState.levelWidth - g_gameState.player.width / 2;
+
+    // Верхняя граница
+    if (g_gameState.player.y < g_gameState.player.height / 2)
+        g_gameState.player.y = g_gameState.player.height / 2;
+
+    // Нижняя граница (пол)
+    if (g_gameState.player.y > g_gameState.levelHeight - g_gameState.player.height / 2)
+        g_gameState.player.y = g_gameState.levelHeight - g_gameState.player.height / 2;
+}
+
+// Обновление камеры
+void UpdateCamera()
+{
+    // Центрируем камеру на игроке
+    g_gameState.cameraX = g_gameState.player.x - g_window.width / 2;
+
+    // Ограничиваем камеру границами уровня
+    if (g_gameState.cameraX < 0)
+        g_gameState.cameraX = 0;
+
+    if (g_gameState.cameraX > g_gameState.levelWidth - g_window.width)
+        g_gameState.cameraX = g_gameState.levelWidth - g_window.width;
 }
 
 // Оконная процедура
@@ -442,13 +750,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
     switch (uMsg)
     {
     case WM_COMMAND:
-        // Обработка нажатий кнопок
         switch (LOWORD(wParam))
         {
         case 1001: // Начать игру
             OnStartGame();
             break;
-
         case 1002: // Выйти
             OnExitGame();
             break;
@@ -456,11 +762,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
         break;
 
     case WM_SIZE:
-        // Обновляем размеры окна
         g_window.width = LOWORD(lParam);
         g_window.height = HIWORD(lParam);
 
-        // Перепозиционируем кнопки если они видны
         if (g_gameState.inMainMenu)
         {
             if (g_window.hStartButton && IsWindow(g_window.hStartButton))
@@ -480,7 +784,25 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             }
         }
 
+        // При изменении размера окна пересоздаем буфер
+        if (g_window.hBufferDC)
+        {
+            HDC hdc = GetDC(hwnd);
+            InitBuffer(hdc);
+            ReleaseDC(hwnd, hdc);
+        }
+
         InvalidateRect(hwnd, nullptr, TRUE);
+        break;
+
+    case WM_TIMER:
+        if (g_gameState.inGame)
+        {
+            ProcessInput();
+            UpdatePlayer();
+            UpdateCamera();
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
         break;
 
     case WM_PAINT:
@@ -488,7 +810,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
 
-        // Рисуем только в зависимости от состояния
         if (g_gameState.inMainMenu)
         {
             RenderMainMenu(hdc);
@@ -521,12 +842,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
         break;
 
     case WM_DESTROY:
+        KillTimer(hwnd, 1);
         PostQuitMessage(0);
         break;
 
     case WM_ERASEBKGND:
-        // Не даем системе стирать фон - делаем это сами в WM_PAINT
-        return 1;
+        return 1; // Говорим Windows, что сами обработали очистку фона
     }
 
     return DefWindowProc(hwnd, uMsg, wParam, lParam);
@@ -535,6 +856,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 // Очистка ресурсов
 void Cleanup()
 {
+    // Очищаем буфер
+    CleanupBuffer();
+
     // Удаляем шрифты кнопок
     if (g_window.hStartButton && IsWindow(g_window.hStartButton))
     {
@@ -546,5 +870,14 @@ void Cleanup()
     {
         HFONT hFont = (HFONT)SendMessage(g_window.hExitButton, WM_GETFONT, 0, 0);
         if (hFont) DeleteObject(hFont);
+    }
+
+    // Удаляем игровые ресурсы
+    if (g_gameState.hLevelBackground) DeleteObject(g_gameState.hLevelBackground);
+    if (g_gameState.player.hSpriteRight) DeleteObject(g_gameState.player.hSpriteRight);
+    if (g_gameState.player.hSpriteRunRight &&
+        g_gameState.player.hSpriteRunRight != g_gameState.player.hSpriteRight)
+    {
+        DeleteObject(g_gameState.player.hSpriteRunRight);
     }
 }
