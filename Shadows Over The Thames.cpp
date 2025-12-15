@@ -28,8 +28,8 @@ struct Player {
 // Глобальные переменные
 struct WindowContext {
     HWND hWnd = nullptr;
-    int width = 1024;
-    int height = 768;
+    int width = 1920;
+    int height = 1080;
     bool should_exit = false;
     HWND hStartButton = nullptr;
     HWND hExitButton = nullptr;
@@ -47,13 +47,14 @@ struct GameState {
     bool inGame = false;
     int currentLevel = 0;
     Player player;
-    float levelWidth = 3800;
-    float levelHeight = 768;
+    float levelWidth = 3840;
+    float levelHeight = 1200;
     HBITMAP hLevelBackground = nullptr;
     DWORD lastRunTime = 0;
     DWORD boostStartTime = 0;
     bool isRunningBoost = false;
     float cameraX = 0;
+    float cameraY = 0; 
 };
 
 WindowContext g_window;
@@ -467,10 +468,12 @@ void RenderGame(HDC hdc)
 
         // Рисуем фон с учетом позиции камеры
         int srcX = (int)g_gameState.cameraX;
+        int srcY = (int)g_gameState.cameraY;
         srcX = max(0, min(srcX, (int)g_gameState.levelWidth - g_window.width));
+        srcY = max(0, min(srcY, (int)g_gameState.levelHeight - g_window.height));
 
         StretchBlt(bufferDC, 0, 0, g_window.width, g_window.height,
-            memDC, srcX, 0, g_window.width, g_window.height, SRCCOPY);
+            memDC, srcX, srcY, g_window.width, g_window.height, SRCCOPY);
 
         SelectObject(memDC, oldBmp);
         DeleteDC(memDC);
@@ -478,11 +481,17 @@ void RenderGame(HDC hdc)
     else
     {
         // Если фон не загружен, рисуем простой
-        HBRUSH floorBrush = CreateSolidBrush(RGB(100, 70, 50));
-        RECT floorRect = { 0, g_window.height - 100, g_window.width, g_window.height };
+        HBRUSH skyBrush = CreateSolidBrush(RGB(135, 206, 235)); // Голубое небо
+        RECT skyRect = { 0, 0, g_window.width, g_window.height - 150 };
+        FillRect(bufferDC, &skyRect, skyBrush);
+        DeleteObject(skyBrush);
+
+        HBRUSH floorBrush = CreateSolidBrush(RGB(100, 70, 50)); // Коричневый пол
+        RECT floorRect = { 0, g_window.height - 150, g_window.width, g_window.height };
         FillRect(bufferDC, &floorRect, floorBrush);
         DeleteObject(floorBrush);
     }
+
 
     // Рисуем игрока в буфер
     RenderPlayer(bufferDC);
@@ -533,7 +542,7 @@ void RenderPlayer(HDC hdc)
 
         // Позиция на экране с учетом камеры
         int screenX = (int)g_gameState.player.x - (int)g_gameState.cameraX - (int)g_gameState.player.width / 2;
-        int screenY = (int)g_gameState.player.y - (int)g_gameState.player.height / 2;
+        int screenY = (int)g_gameState.player.y - (int)g_gameState.cameraY - (int)g_gameState.player.height / 2;
 
         RECT playerRect = {
             screenX,
@@ -624,7 +633,7 @@ void InitLevel1()
 {
     // Загружаем фон уровня
     g_gameState.hLevelBackground = LoadBmpFromDebug("level1.bmp");
-
+    
     // Загружаем спрайт игрока
     g_gameState.player.hSpriteRight = LoadBmpFromDebug("player.bmp");
     g_gameState.player.hSpriteRunRight = LoadBmpFromDebug("player_run.bmp");
@@ -634,8 +643,8 @@ void InitLevel1()
         g_gameState.player.hSpriteRunRight = g_gameState.player.hSpriteRight;
 
     // Начальная позиция игрока
-    g_gameState.player.x = 200;
-    g_gameState.player.y = g_gameState.levelHeight - 200;
+    g_gameState.player.x = 500;
+    g_gameState.player.y = g_gameState.levelHeight - 300;
     g_gameState.player.facingRight = true;
 
     // Сбрасываем камеру
@@ -713,35 +722,52 @@ void UpdatePlayer()
 // Ограничения перемещения игрока
 void LimitPlayerOnGround()
 {
-    // Левая граница уровня
-    if (g_gameState.player.x < g_gameState.player.width / 2)
-        g_gameState.player.x = g_gameState.player.width / 2;
+    //// Левая граница уровня
+    //if (g_gameState.player.x < g_gameState.player.width / 2)
+    //    g_gameState.player.x = g_gameState.player.width / 2;
 
-    // Правая граница уровня
-    if (g_gameState.player.x > g_gameState.levelWidth - g_gameState.player.width / 2)
-        g_gameState.player.x = g_gameState.levelWidth - g_gameState.player.width / 2;
+    //// Правая граница уровня
+    //if (g_gameState.player.x > g_gameState.levelWidth - g_gameState.player.width / 2)
+    //    g_gameState.player.x = g_gameState.levelWidth - g_gameState.player.width / 2;
 
-    // Верхняя граница
-    if (g_gameState.player.y < g_gameState.player.height / 2)
-        g_gameState.player.y = g_gameState.player.height / 2;
+    //// Верхняя граница
+    //if (g_gameState.player.y < g_gameState.player.height / 2)
+    //    g_gameState.player.y = g_gameState.player.height / 2;
 
-    // Нижняя граница (пол)
-    if (g_gameState.player.y > g_gameState.levelHeight - g_gameState.player.height / 2)
-        g_gameState.player.y = g_gameState.levelHeight - g_gameState.player.height / 2;
+    //// Нижняя граница (пол)
+    //if (g_gameState.player.y > g_gameState.levelHeight - g_gameState.player.height / 2)
+    //    g_gameState.player.y = g_gameState.levelHeight - g_gameState.player.height / 2;
 }
 
 // Обновление камеры
 void UpdateCamera()
 {
-    // Центрируем камеру на игроке
+    //Плавное следование камеры
+    float targetX = g_gameState.player.x - g_window.width / 2;
+    float targetY = g_gameState.player.y - g_window.height / 2;
+
+    g_gameState.cameraX += (targetX - g_gameState.cameraX) * 0.1f;
+    g_gameState.cameraY += (targetY - g_gameState.cameraY) * 0.1f;
+
+    // Горизонтальная камера
     g_gameState.cameraX = g_gameState.player.x - g_window.width / 2;
 
-    // Ограничиваем камеру границами уровня
+    // Вертикальная камера (следим за игроком по Y)
+    g_gameState.cameraY = g_gameState.player.y - g_window.height / 2;
+
+    // Ограничиваем камеру границами уровня по X
     if (g_gameState.cameraX < 0)
         g_gameState.cameraX = 0;
 
     if (g_gameState.cameraX > g_gameState.levelWidth - g_window.width)
         g_gameState.cameraX = g_gameState.levelWidth - g_window.width;
+
+    // Ограничиваем камеру границами уровня по Y
+    if (g_gameState.cameraY < 0)
+        g_gameState.cameraY = 0;
+
+    if (g_gameState.cameraY > g_gameState.levelHeight - g_window.height)
+        g_gameState.cameraY = g_gameState.levelHeight - g_window.height;
 }
 
 // Оконная процедура
