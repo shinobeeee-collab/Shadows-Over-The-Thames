@@ -5,8 +5,10 @@
 #include <commctrl.h>
 #include <cmath>
 #include <algorithm>
+#include <mmsystem.h>
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "msimg32.lib")
+#pragma comment(lib, "winmm.lib")
 
 // Структуры для игрока
 struct Player {
@@ -48,13 +50,14 @@ struct GameState {
     int currentLevel = 0;
     Player player;
     float levelWidth = 3840;
-    float levelHeight = 1200;
+    float levelHeight = 2000;
     HBITMAP hLevelBackground = nullptr;
     DWORD lastRunTime = 0;
     DWORD boostStartTime = 0;
     bool isRunningBoost = false;
     float cameraX = 0;
     float cameraY = 0; 
+    bool isMusicPlaying = false;
 };
 
 WindowContext g_window;
@@ -85,7 +88,169 @@ void LimitPlayerOnGround();
 void UpdateCamera();
 void InitBuffer(HDC hdc);
 void CleanupBuffer();
+void PlayBackgroundMusic(const char* filename);
+void StopBackgroundMusic();
+void ToggleMusicPause();
 
+void PlayBackgroundMusic(const char* filename)
+{
+    StopBackgroundMusic();
+
+    OutputDebugStringA("=== ЗАПУСК МУЗЫКИ ===\n");
+
+    char debug[512];
+    sprintf_s(debug, "Ищем файл: %s\n", filename);
+    OutputDebugStringA(debug);
+
+    // Проверяем существование файла
+    DWORD attr = GetFileAttributesA(filename);
+    if (attr == INVALID_FILE_ATTRIBUTES)
+    {
+        sprintf_s(debug, "Файл не найден напрямую: %s\n", filename);
+        OutputDebugStringA(debug);
+        return;
+    }
+
+    // Получаем размер файла
+    HANDLE hFile = CreateFileA(filename, GENERIC_READ, FILE_SHARE_READ,
+        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile != INVALID_HANDLE_VALUE)
+    {
+        DWORD fileSize = GetFileSize(hFile, NULL);
+        CloseHandle(hFile);
+        sprintf_s(debug, "Размер файла: %lu байт (%.1f KB)\n", fileSize, fileSize / 1024.0f);
+        OutputDebugStringA(debug);
+
+        if (fileSize == 0)
+        {
+            OutputDebugStringA("Файл пустой!\n");
+            return;
+        }
+    }
+
+    // 1. Пробуем через PlaySound (самый простой способ)
+    OutputDebugStringA("1. Пробуем PlaySound...\n");
+    if (PlaySoundA(filename, NULL, SND_ASYNC | SND_LOOP | SND_FILENAME | SND_NODEFAULT))
+    {
+        OutputDebugStringA("PlaySound УСПЕХ! Музыка должна играть\n");
+        g_gameState.isMusicPlaying = true;
+        return;
+    }
+    else
+    {
+        DWORD err = GetLastError();
+        sprintf_s(debug, "PlaySound ошибка: %lu\n", err);
+        OutputDebugStringA(debug);
+    }
+
+    // 2. Пробуем через MCI
+    OutputDebugStringA("2. Пробуем MCI...\n");
+
+    // Сначала закрываем, если что-то было открыто
+    mciSendStringA("close all", NULL, 0, NULL);
+
+    // Открываем файл
+    std::string openCmd = "open \"";
+    openCmd += filename;
+    openCmd += "\" type waveaudio alias bgmusic";
+
+    MCIERROR mciError = mciSendStringA(openCmd.c_str(), NULL, 0, NULL);
+    if (mciError != 0)
+    {
+        char mciErrorMsg[256];
+        mciGetErrorStringA(mciError, mciErrorMsg, sizeof(mciErrorMsg));
+        sprintf_s(debug, "MCI open ошибка: %s (код: %lu)\n", mciErrorMsg, mciError);
+        OutputDebugStringA(debug);
+
+        // Пробуем как mpegvideo (для mp3)
+        openCmd = "open \"";
+        openCmd += filename;
+        openCmd += "\" type mpegvideo alias bgmusic";
+
+        mciError = mciSendStringA(openCmd.c_str(), NULL, 0, NULL);
+        if (mciError != 0)
+        {
+            mciGetErrorStringA(mciError, mciErrorMsg, sizeof(mciErrorMsg));
+            sprintf_s(debug, "MCI mpegvideo тоже ошибка: %s\n", mciErrorMsg);
+            OutputDebugStringA(debug);
+            return;
+        }
+    }
+
+    OutputDebugStringA("MCI файл открыт успешно\n");
+
+    // Получаем информацию о файле
+    char info[256];
+    mciSendStringA("status bgmusic length", info, sizeof(info), NULL);
+    sprintf_s(debug, "Длина трека: %s мс\n", info);
+    OutputDebugStringA(debug);
+
+    mciSendStringA("status bgmusic mode", info, sizeof(info), NULL);
+    sprintf_s(debug, "Режим: %s\n", info);
+    OutputDebugStringA(debug);
+
+    // Устанавливаем громкость на максимум
+    mciSendStringA("setaudio bgmusic volume to 1000", NULL, 0, NULL);
+
+    // Запускаем с повторением
+    mciError = mciSendStringA("play bgmusic repeat", NULL, 0, NULL);
+    if (mciError != 0)
+    {
+        char mciErrorMsg[256];
+        mciGetErrorStringA(mciError, mciErrorMsg, sizeof(mciErrorMsg));
+        sprintf_s(debug, "MCI play ошибка: %s\n", mciErrorMsg);
+        OutputDebugStringA(debug);
+
+        // Пробуем без repeat
+        mciError = mciSendStringA("play bgmusic", NULL, 0, NULL);
+        if (mciError == 0)
+        {
+            OutputDebugStringA("MCI запущен без повторения\n");
+            g_gameState.isMusicPlaying = true;
+        }
+        return;
+    }
+
+    OutputDebugStringA("MCI музыка запущена с повторением\n");
+    g_gameState.isMusicPlaying = true;
+
+    OutputDebugStringA("=== МУЗЫКА ЗАПУЩЕНА ===\n");
+
+    // Тестовый звук через 2 секунды
+    SetTimer(g_window.hWnd, 3, 2000, NULL);
+}
+
+// Остановка музыки
+void StopBackgroundMusic()
+{
+    if (g_gameState.isMusicPlaying)
+    {
+        mciSendStringA("stop bgmusic", NULL, 0, NULL);
+        mciSendStringA("close bgmusic", NULL, 0, NULL);
+        g_gameState.isMusicPlaying = false;
+        OutputDebugStringA("Музыка остановлена\n");
+    }
+}
+
+// Пауза/возобновление музыки
+void ToggleMusicPause()
+{
+    if (g_gameState.isMusicPlaying)
+    {
+        static bool isPaused = false;
+        if (isPaused)
+        {
+            mciSendStringA("play bgmusic", NULL, 0, NULL);
+            OutputDebugStringA("Музыка возобновлена\n");
+        }
+        else
+        {
+            mciSendStringA("pause bgmusic", NULL, 0, NULL);
+            OutputDebugStringA("Музыка на паузе\n");
+        }
+        isPaused = !isPaused;
+    }
+}
 // Функция для зеркального отображения битмапа
 void DrawMirroredBitmap(HDC hdc, int x, int y, int width, int height,
     HDC memDC, HBITMAP hBitmap, int srcWidth, int srcHeight)
@@ -180,9 +345,10 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
         0,
         CLASS_NAME,
         L"Shadows Over The Thames",
-        WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT,
-        g_window.width, g_window.height,
+        WS_POPUP | WS_VISIBLE,  
+        0, 0,                   
+        GetSystemMetrics(SM_CXSCREEN),  
+        GetSystemMetrics(SM_CYSCREEN),  
         nullptr,
         nullptr,
         hInstance,
@@ -542,7 +708,7 @@ void RenderPlayer(HDC hdc)
 
         // Позиция на экране с учетом камеры
         int screenX = (int)g_gameState.player.x - (int)g_gameState.cameraX - (int)g_gameState.player.width / 2;
-        int screenY = (int)g_gameState.player.y - (int)g_gameState.cameraY - (int)g_gameState.player.height / 2;
+        int screenY = (int)g_gameState.player.y - (int)g_gameState.cameraY - (int)g_gameState.player.height / 2; 
 
         RECT playerRect = {
             screenX,
@@ -577,7 +743,7 @@ void RenderPlayer(HDC hdc)
 
         // Позиция на экране с учетом камеры
         int screenX = (int)g_gameState.player.x - (int)g_gameState.cameraX - (int)g_gameState.player.width / 2;
-        int screenY = (int)g_gameState.player.y - (int)g_gameState.player.height / 2;
+        int screenY = (int)g_gameState.player.y - (int)g_gameState.cameraY - (int)g_gameState.player.height / 2;  
 
         if (g_gameState.player.facingRight)
         {
@@ -619,6 +785,8 @@ void OnStartGame()
 
     // Перерисовываем
     InvalidateRect(g_window.hWnd, nullptr, TRUE);
+
+    PlayBackgroundMusic("x64\\Debug\\bazar.wav");
 }
 
 // Выйти из игры
@@ -684,7 +852,7 @@ void ProcessInput()
     {
         g_gameState.isRunningBoost = true;
         g_gameState.boostStartTime = currentTime;
-        g_gameState.player.speed = 10;
+        g_gameState.player.speed = 12;
         g_gameState.player.isRunning = true;
         g_gameState.lastRunTime = currentTime;
     }
@@ -742,18 +910,18 @@ void LimitPlayerOnGround()
 // Обновление камеры
 void UpdateCamera()
 {
-    //Плавное следование камеры
+    // Плавное следование камеры
     float targetX = g_gameState.player.x - g_window.width / 2;
     float targetY = g_gameState.player.y - g_window.height / 2;
 
+    // Отладка - выводим значения
+    char debug[256];
+    sprintf_s(debug, "PlayerY: %.0f, WindowH: %d, TargetY: %.0f, CameraY: %.0f, LevelH: %.0f\n",
+        g_gameState.player.y, g_window.height, targetY, g_gameState.cameraY, g_gameState.levelHeight);
+    OutputDebugStringA(debug);
+
     g_gameState.cameraX += (targetX - g_gameState.cameraX) * 0.1f;
     g_gameState.cameraY += (targetY - g_gameState.cameraY) * 0.1f;
-
-    // Горизонтальная камера
-    g_gameState.cameraX = g_gameState.player.x - g_window.width / 2;
-
-    // Вертикальная камера (следим за игроком по Y)
-    g_gameState.cameraY = g_gameState.player.y - g_window.height / 2;
 
     // Ограничиваем камеру границами уровня по X
     if (g_gameState.cameraX < 0)
@@ -766,8 +934,12 @@ void UpdateCamera()
     if (g_gameState.cameraY < 0)
         g_gameState.cameraY = 0;
 
+    // ВАЖНО: Проверяем это условие!
     if (g_gameState.cameraY > g_gameState.levelHeight - g_window.height)
+    {
         g_gameState.cameraY = g_gameState.levelHeight - g_window.height;
+        OutputDebugStringA("CameraY ограничена сверху!\n");
+    }
 }
 
 // Оконная процедура
@@ -857,6 +1029,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                 // Возвращаемся в меню
                 g_gameState.inGame = false;
                 g_gameState.inMainMenu = true;
+                StopBackgroundMusic();
                 ShowMainMenuButtons(true);
                 InvalidateRect(hwnd, nullptr, TRUE);
             }
@@ -882,6 +1055,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 // Очистка ресурсов
 void Cleanup()
 {
+    StopBackgroundMusic();
     // Очищаем буфер
     CleanupBuffer();
 
