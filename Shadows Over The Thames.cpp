@@ -14,7 +14,7 @@
 struct Player {
     float x = 100.0f;
     float y = 300.0f;
-    float width = 64.0f;
+    float width = 180.0f;
     float height = 128.0f;
     float speed = 5.0f;
     bool facingRight = true;
@@ -803,7 +803,7 @@ void InitLevel1()
     g_gameState.hLevelBackground = LoadBmpFromDebug("level1.bmp");
     
     // Загружаем спрайт игрока
-    g_gameState.player.hSpriteRight = LoadBmpFromDebug("player.bmp");
+    g_gameState.player.hSpriteRight = LoadBmpFromDebug("player_walking_2.bmp");
     g_gameState.player.hSpriteRunRight = LoadBmpFromDebug("player_run.bmp");
 
     // Если нет спрайта бега, используем обычный
