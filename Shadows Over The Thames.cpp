@@ -10,21 +10,116 @@
 #pragma comment(lib, "msimg32.lib")
 #pragma comment(lib, "winmm.lib")
 
+// Структура для анимации
+struct AnimationFrames
+{
+    std::vector<HBITMAP> frames;
+    int currentFrame = 0;
+    DWORD lastUpdateTime = 0;
+    DWORD frameDelay = 120; // мс
+    bool loaded = false;
+
+    // Очистка кадров
+    void Clear() {
+        for (auto& frame : frames) {
+            if (frame) DeleteObject(frame);
+        }
+        frames.clear();
+        currentFrame = 0;
+        loaded = false;
+    }
+};
+
 // Структуры для игрока
 struct Player {
     float x = 100.0f;
     float y = 300.0f;
     float width = 180.0f;
-    float height = 128.0f;
+    float height = 256.0f;
     float speed = 5.0f;
     bool facingRight = true;
     bool isMoving = false;
     bool isRunning = false;
+
+    AnimationFrames idleAnimation;
+    AnimationFrames walkAnimation;
+    AnimationFrames runAnimation;
+
+    // Для обратной совместимости 
     HBITMAP hSpriteRight = nullptr;
     HBITMAP hSpriteRunRight = nullptr;
-    int currentFrame = 0;
-    DWORD lastFrameTime = 0;
-    DWORD frameDelay = 150;
+
+    DWORD lastRunTime = 0;
+    DWORD boostStartTime = 0;
+    bool isRunningBoost = false;
+    DWORD idleTimer = 0;
+    bool isIdle = true; 
+
+    // Получение текущего спрайта
+    HBITMAP GetCurrentSprite() 
+    {
+        if (isRunning && runAnimation.loaded && runAnimation.frames.size() > 0) {
+            return runAnimation.frames[runAnimation.currentFrame];
+        }
+        else if (isMoving && walkAnimation.loaded && walkAnimation.frames.size() > 0) {
+            return walkAnimation.frames[walkAnimation.currentFrame];
+        }
+        else if (idleAnimation.loaded && idleAnimation.frames.size() > 0) {
+            return idleAnimation.frames[idleAnimation.currentFrame];
+        }
+        return nullptr;
+    }
+
+    // Обновление анимации
+// Обновление анимации (внутри структуры Player)
+    void UpdateAnimation(DWORD currentTime) {
+        AnimationFrames* anim = &idleAnimation; // По умолчанию idle
+
+        if (isRunning && runAnimation.loaded) {
+            anim = &runAnimation;
+            isIdle = false;
+            idleTimer = currentTime;
+        }
+        else if (isMoving && walkAnimation.loaded) {
+            anim = &walkAnimation;
+            isIdle = false;
+            idleTimer = currentTime;
+        }
+        else if (idleAnimation.loaded) {
+            anim = &idleAnimation;
+
+            // Проверяем, сколько времени игрок стоит
+            if (currentTime - idleTimer > 1000) { // 2 секунды неподвижности
+                isIdle = true;
+            }
+            else {
+                // Ещё не прошло 2 секунды, используем первый кадр idle
+                anim->currentFrame = 0;
+                return;
+            }
+        }
+
+        if (!anim->loaded || anim->frames.empty()) return;
+
+        // Для idle-анимации обновляем кадры только если действительно idle
+        if (anim == &idleAnimation && !isIdle) {
+            anim->currentFrame = 0;
+            return;
+        }
+
+        // Обновляем кадр, если пришло время
+        if (currentTime - anim->lastUpdateTime > anim->frameDelay) {
+            anim->currentFrame = (anim->currentFrame + 1) % anim->frames.size();
+            anim->lastUpdateTime = currentTime;
+        }
+    }
+
+    // Очистка ресурсов
+    void Cleanup() {
+        idleAnimation.Clear();
+        walkAnimation.Clear();
+        runAnimation.Clear();
+    }
 };
 
 // Глобальные переменные
@@ -52,11 +147,8 @@ struct GameState {
     float levelWidth = 3840;
     float levelHeight = 2000;
     HBITMAP hLevelBackground = nullptr;
-    DWORD lastRunTime = 0;
-    DWORD boostStartTime = 0;
-    bool isRunningBoost = false;
     float cameraX = 0;
-    float cameraY = 0; 
+    float cameraY = 0;
     bool isMusicPlaying = false;
 };
 
@@ -91,6 +183,9 @@ void CleanupBuffer();
 void PlayBackgroundMusic(const char* filename);
 void StopBackgroundMusic();
 void ToggleMusicPause();
+void LoadWalkAnimation(Player& player, const std::vector<std::string>& rightFiles, DWORD frameDelay = 120);
+void LoadRunAnimation(Player& player, const std::vector<std::string>& rightFiles, DWORD frameDelay = 100);
+void LoadIdleAnimation(Player& player, const std::vector<std::string>& rightFiles, DWORD frameDelay = 200);
 
 void PlayBackgroundMusic(const char* filename)
 {
@@ -681,10 +776,45 @@ void RenderGame(HDC hdc)
     RECT posRect = { 20, 20, 300, 50 };
     DrawText(bufferDC, posText.c_str(), -1, &posRect, DT_LEFT | DT_SINGLELINE);
 
+    // Информация об анимации (для отладки)
+    std::wstring animText;
+    if (g_gameState.player.isRunning && g_gameState.player.runAnimation.loaded)
+    {
+        animText = L"БЕГ: " + std::to_wstring(g_gameState.player.runAnimation.currentFrame + 1) +
+            L"/" + std::to_wstring(g_gameState.player.runAnimation.frames.size());
+    }
+    else if (g_gameState.player.isMoving && g_gameState.player.walkAnimation.loaded)
+    {
+        animText = L"ХОДЬБА: " + std::to_wstring(g_gameState.player.walkAnimation.currentFrame + 1) +
+            L"/" + std::to_wstring(g_gameState.player.walkAnimation.frames.size());
+    }
+    else if (g_gameState.player.idleAnimation.loaded)
+    {
+        animText = L"IDLE: " + std::to_wstring(g_gameState.player.idleAnimation.currentFrame + 1) +
+            L"/" + std::to_wstring(g_gameState.player.idleAnimation.frames.size());
+    }
+    else
+    {
+        animText = L"Анимация не загружена";
+    }
+
+    // Состояние idle
+    if (g_gameState.player.isIdle) {
+        animText += L" [IDLE]";
+    }
+
+    RECT animRect = { 20, 50, 400, 80 };
+    DrawText(bufferDC, animText.c_str(), -1, &animRect, DT_LEFT | DT_SINGLELINE);
+
     // Подсказки управления
     std::wstring controls = L"WASD - Движение | SHIFT - Бег | ESC - Меню";
     RECT controlsRect = { g_window.width / 2 - 200, 20, g_window.width / 2 + 200, 50 };
     DrawText(bufferDC, controls.c_str(), -1, &controlsRect, DT_CENTER | DT_SINGLELINE);
+
+    // Скорость игрока
+    std::wstring speedText = L"Скорость: " + std::to_wstring((int)g_gameState.player.speed);
+    RECT speedRect = { 20, 80, 300, 110 };
+    DrawText(bufferDC, speedText.c_str(), -1, &speedRect, DT_LEFT | DT_SINGLELINE);
 
     SelectObject(bufferDC, oldFont);
     DeleteObject(font);
@@ -697,10 +827,15 @@ void RenderGame(HDC hdc)
 void RenderPlayer(HDC hdc)
 {
     // Выбираем спрайт
-    HBITMAP hSprite = g_gameState.player.isRunning ?
-        g_gameState.player.hSpriteRunRight :
-        g_gameState.player.hSpriteRight;
+    // Получаем текущий спрайт из новой системы анимации
+    HBITMAP hSprite = g_gameState.player.GetCurrentSprite();
 
+    if (!hSprite)
+    {
+        hSprite = g_gameState.player.isRunning ?
+            g_gameState.player.hSpriteRunRight :
+            g_gameState.player.hSpriteRight;
+    }
     // Если нет спрайтов, рисуем простого человечка
     if (!hSprite)
     {
@@ -770,6 +905,104 @@ void RenderPlayer(HDC hdc)
     }
 }
 
+void LoadWalkAnimation(Player& player, const std::vector<std::string>& rightFiles, DWORD frameDelay /* = 120 */)
+{
+    // Очищаем старые кадры
+    player.walkAnimation.Clear();
+
+    player.walkAnimation.frameDelay = frameDelay;
+
+    // Загружаем каждый кадр
+    for (const auto& filename : rightFiles) {
+        HBITMAP frame = LoadBmpFromDebug(filename.c_str());
+        if (frame) {
+            player.walkAnimation.frames.push_back(frame);
+        }
+        else {
+            char debug[256];
+            sprintf_s(debug, "Не удалось загрузить кадр: %s\n", filename.c_str());
+            OutputDebugStringA(debug);
+        }
+    }
+
+    player.walkAnimation.loaded = !player.walkAnimation.frames.empty();
+
+    // Для обратной совместимости
+    if (!player.walkAnimation.frames.empty()) {
+        player.hSpriteRight = player.walkAnimation.frames[0];
+    }
+
+    char debug[256];
+    sprintf_s(debug, "Загружено %d кадров ходьбы\n", (int)player.walkAnimation.frames.size());
+    OutputDebugStringA(debug);
+}
+
+// Загрузка анимации бега
+void LoadRunAnimation(Player& player, const std::vector<std::string>& rightFiles, DWORD frameDelay /* = 100 */)
+{
+    // Очищаем старые кадры
+    player.runAnimation.Clear();
+
+    player.runAnimation.frameDelay = frameDelay;
+
+    // Загружаем каждый кадр
+    for (const auto& filename : rightFiles) {
+        HBITMAP frame = LoadBmpFromDebug(filename.c_str());
+        if (frame) {
+            player.runAnimation.frames.push_back(frame);
+        }
+        else {
+            char debug[256];
+            sprintf_s(debug, "Не удалось загрузить кадр: %s\n", filename.c_str());
+            OutputDebugStringA(debug);
+        }
+    }
+
+    player.runAnimation.loaded = !player.runAnimation.frames.empty();
+
+    // Для обратной совместимости
+    if (!player.runAnimation.frames.empty()) {
+        player.hSpriteRunRight = player.runAnimation.frames[0];
+    }
+
+    char debug[256];
+    sprintf_s(debug, "Загружено %d кадров бега\n", (int)player.runAnimation.frames.size());
+    OutputDebugStringA(debug);
+}
+
+void LoadIdleAnimation(Player& player, const std::vector<std::string>& rightFiles, DWORD frameDelay /* = 200 */)
+{
+    // Очищаем старые кадры
+    player.idleAnimation.Clear();
+
+    player.idleAnimation.frameDelay = frameDelay; // Медленнее для idle
+
+    // Загружаем каждый кадр
+    for (const auto& filename : rightFiles) {
+        HBITMAP frame = LoadBmpFromDebug(filename.c_str());
+        if (frame) {
+            player.idleAnimation.frames.push_back(frame);
+        }
+        else {
+            char debug[256];
+            sprintf_s(debug, "Не удалось загрузить кадр idle: %s\n", filename.c_str());
+            OutputDebugStringA(debug);
+        }
+    }
+
+    player.idleAnimation.loaded = !player.idleAnimation.frames.empty();
+
+    // Для обратной совместимости
+    if (!player.idleAnimation.frames.empty()) {
+        player.hSpriteRight = player.idleAnimation.frames[0];
+    }
+
+    char debug[256];
+    sprintf_s(debug, "Загружено %d кадров idle-анимации\n", (int)player.idleAnimation.frames.size());
+    OutputDebugStringA(debug);
+}
+
+
 // Начать игру
 void OnStartGame()
 {
@@ -801,93 +1034,157 @@ void InitLevel1()
 {
     // Загружаем фон уровня
     g_gameState.hLevelBackground = LoadBmpFromDebug("level1.bmp");
-    
-    // Загружаем спрайт игрока
-    g_gameState.player.hSpriteRight = LoadBmpFromDebug("player_walking_2.bmp");
-    g_gameState.player.hSpriteRunRight = LoadBmpFromDebug("player_run.bmp");
 
-    // Если нет спрайта бега, используем обычный
-    if (!g_gameState.player.hSpriteRunRight)
-        g_gameState.player.hSpriteRunRight = g_gameState.player.hSpriteRight;
+    // Загружаем idle-анимацию (6 кадров)
+    std::vector<std::string> idleFrames = {
+        "player_idle_1.bmp",
+        "player_idle_2.bmp",
+        "player_idle_3.bmp",
+        "player_idle_4.bmp",
+        "player_idle_5.bmp",
+        "player_idle_6.bmp"
+    };
+    LoadIdleAnimation(g_gameState.player, idleFrames, 200); // 200 мс на кадр
+
+    // Загружаем анимацию ходьбы (8 кадров)
+    std::vector<std::string> walkFrames = {
+        "player_walking_1.bmp",
+        "player_walking_2.bmp",
+        "player_walking_3.bmp",
+        "player_walking_4.bmp",
+        "player_walking_5.bmp",
+        "player_walking_6.bmp",
+        "player_walking_7.bmp",
+        "player_walking_8.bmp"
+    };
+    LoadWalkAnimation(g_gameState.player, walkFrames, 120); // 120 мс на кадр
+
+    // Загружаем анимацию бега (8 кадров)
+    std::vector<std::string> runFrames = {
+        "player_running_1.bmp",
+        "player_running_2.bmp",
+        "player_running_3.bmp",
+        "player_running_4.bmp",
+        "player_running_5.bmp",
+        "player_running_6.bmp",
+        "player_running_7.bmp",
+        "player_running_8.bmp"
+    };
+    LoadRunAnimation(g_gameState.player, runFrames, 80); // 80 мс на кадр
 
     // Начальная позиция игрока
     g_gameState.player.x = 500;
     g_gameState.player.y = g_gameState.levelHeight - 300;
     g_gameState.player.facingRight = true;
+    g_gameState.player.isIdle = true;
 
     // Сбрасываем камеру
     g_gameState.cameraX = 0;
+    g_gameState.cameraY = 0;
+
+    // Инициализируем время анимации
+    DWORD currentTime = GetTickCount();
+    g_gameState.player.idleAnimation.lastUpdateTime = currentTime;
+    g_gameState.player.walkAnimation.lastUpdateTime = currentTime;
+    g_gameState.player.runAnimation.lastUpdateTime = currentTime;
+    g_gameState.player.idleTimer = currentTime; // Старт таймера idle
 }
 
 // Обработка ввода
+// Обработка ввода
+// Обработка ввода
 void ProcessInput()
 {
-    DWORD currentTime = GetTickCount64();
+    Player& player = g_gameState.player;
+    DWORD currentTime = GetTickCount();
 
     // Движение
     bool moved = false;
     if (GetAsyncKeyState('W') & 0x8000) {
-        g_gameState.player.y -= g_gameState.player.speed;
+        player.y -= player.speed;
         moved = true;
     }
     if (GetAsyncKeyState('S') & 0x8000) {
-        g_gameState.player.y += g_gameState.player.speed;
+        player.y += player.speed;
         moved = true;
     }
     if (GetAsyncKeyState('A') & 0x8000)
     {
-        g_gameState.player.x -= g_gameState.player.speed;
-        g_gameState.player.facingRight = false;
+        player.x -= player.speed;
+        player.facingRight = false;
         moved = true;
     }
     if (GetAsyncKeyState('D') & 0x8000) {
-        g_gameState.player.x += g_gameState.player.speed;
-        g_gameState.player.facingRight = true;
+        player.x += player.speed;
+        player.facingRight = true;
         moved = true;
     }
-    g_gameState.player.isMoving = moved;
 
-    // Бег
-    if (GetAsyncKeyState(VK_SHIFT) & 0x8000 && currentTime - g_gameState.lastRunTime >= 1000)
-    {
-        g_gameState.isRunningBoost = true;
-        g_gameState.boostStartTime = currentTime;
-        g_gameState.player.speed = 12;
-        g_gameState.player.isRunning = true;
-        g_gameState.lastRunTime = currentTime;
+    // Обновляем состояние движения
+    player.isMoving = moved;
+
+    // Сбрасываем idle-таймер при движении
+    if (moved) {
+        player.idleTimer = currentTime;
+        player.isIdle = false;
     }
 
-    // Сброс бега через 3 секунды
-    if (g_gameState.isRunningBoost && currentTime - g_gameState.boostStartTime >= 3000)
+    // Бег
+    if ((GetAsyncKeyState(VK_SHIFT) & 0x8000) && player.runAnimation.loaded)
     {
-        g_gameState.player.speed = 5;
-        g_gameState.player.isRunning = false;
-        g_gameState.isRunningBoost = false;
+        if (!player.isRunningBoost)
+        {
+            player.isRunningBoost = true;
+            player.boostStartTime = currentTime;
+        }
+
+        player.speed = 12;
+        player.isRunning = true;
+        player.lastRunTime = currentTime;
+        player.idleTimer = currentTime; // Сброс idle-таймера
+        player.isIdle = false;
+    }
+    else if (player.isRunningBoost)
+    {
+        player.isRunningBoost = false;
+        player.speed = 5;
+        player.isRunning = false;
+    }
+
+    // Автоматический сброс бега через 5 секунд
+    if (player.isRunningBoost && (currentTime - player.boostStartTime >= 5000))
+    {
+        player.isRunningBoost = false;
+        player.speed = 5;
+        player.isRunning = false;
     }
 }
 
+// Обновление состояния игрока
 // Обновление состояния игрока
 void UpdatePlayer()
 {
     LimitPlayerOnGround();
 
-    // Обновление анимации
-    if (g_gameState.player.isMoving)
+    // Устанавливаем скорость анимации
+    if (g_gameState.player.isRunning)
     {
-        DWORD currentTime = GetTickCount64();
-        if (currentTime - g_gameState.player.lastFrameTime > g_gameState.player.frameDelay)
-        {
-            g_gameState.player.currentFrame = (g_gameState.player.currentFrame + 1) % 4;
-            g_gameState.player.lastFrameTime = currentTime;
-        }
+        g_gameState.player.runAnimation.frameDelay = 80;
+    }
+    else if (g_gameState.player.isMoving)
+    {
+        g_gameState.player.walkAnimation.frameDelay = 120;
     }
     else
     {
-        g_gameState.player.currentFrame = 0;
+        g_gameState.player.idleAnimation.frameDelay = 200; 
     }
+
+    // Используем новую систему анимации
+    g_gameState.player.UpdateAnimation(GetTickCount());
 }
 
-// Ограничения перемещения игрока
+// Ограничения перемещения игрока   
 void LimitPlayerOnGround()
 {
     //// Левая граница уровня
@@ -907,6 +1204,7 @@ void LimitPlayerOnGround()
     //    g_gameState.player.y = g_gameState.levelHeight - g_gameState.player.height / 2;
 }
 
+// Обновление камеры
 // Обновление камеры
 void UpdateCamera()
 {
@@ -1053,11 +1351,15 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 }
 
 // Очистка ресурсов
+// Очистка ресурсов
 void Cleanup()
 {
     StopBackgroundMusic();
     // Очищаем буфер
     CleanupBuffer();
+
+    // Очищаем ресурсы игрока (ВКЛЮЧАЯ новую систему анимации)
+    g_gameState.player.Cleanup();
 
     // Удаляем шрифты кнопок
     if (g_window.hStartButton && IsWindow(g_window.hStartButton))
@@ -1072,7 +1374,7 @@ void Cleanup()
         if (hFont) DeleteObject(hFont);
     }
 
-    // Удаляем игровые ресурсы
+    // Удаляем фон уровня 
     if (g_gameState.hLevelBackground) DeleteObject(g_gameState.hLevelBackground);
     if (g_gameState.player.hSpriteRight) DeleteObject(g_gameState.player.hSpriteRight);
     if (g_gameState.player.hSpriteRunRight &&
