@@ -1,2861 +1,2436 @@
-﻿// Shadows Over The Thames.cpp
+﻿// Shadows Over The Thames - Изометрическая игра с 3D NPC (ВЕРСИЯ С ПОДДЕРЖКОЙ MTL)
 #include <windows.h>
-#include <string>
+#include <d3d11.h>
+#include <d3dcompiler.h>
+#include <DirectXMath.h>
+#include <wincodec.h>
 #include <vector>
-#include <commctrl.h>
+#include <fstream>
+#include <sstream>
+#include <map>
+#include <memory>
+#include <string>
 #include <cmath>
 #include <algorithm>
-#include <mmsystem.h>
-#include <map>
-#include <sstream>
-#pragma comment(lib, "comctl32.lib")
-#pragma comment(lib, "msimg32.lib")
-#pragma comment(lib, "winmm.lib")
+#include <filesystem>
+#include <assimp/Importer.hpp>
+#include <assimp/scene.h>
+#include <assimp/postprocess.h>
 
-// Структура для анимации
-struct AnimationFrames
-{
-    std::vector<HBITMAP> frames;
-    int currentFrame = 0;
-    DWORD lastUpdateTime = 0;
-    DWORD frameDelay = 120; // мс
-    bool loaded = false;
+// Добавьте этот дефайн для аннотаций SAL
+#define _In_
+#define _In_opt_
+#define _In_z_
+#define _Out_
+#define _Out_opt_
+#define _Inout_
+#define _Inout_opt_
 
-    // Очистка кадров
-    void Clear() {
-        for (auto& frame : frames) {
-            if (frame) DeleteObject(frame);
-        }
-        frames.clear();
-        currentFrame = 0;
-        loaded = false;
+#pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "d3dcompiler.lib")
+#pragma comment(lib, "windowscodecs.lib")
+
+using namespace DirectX;
+// ==================== КОНСТАНТЫ И МАКРОСЫ ====================
+const int SCREEN_WIDTH = 1280;
+const int SCREEN_HEIGHT = 720;
+const float CAMERA_DISTANCE = 15.0f;
+const float CAMERA_HEIGHT = 10.0f;
+
+// Отладочный вывод
+#define DEBUG_LOG(msg) OutputDebugStringA((std::string("[DEBUG] ") + msg + "\n").c_str())
+#define DEBUG_LOG_W(msg) OutputDebugStringW((std::wstring(L"[DEBUG] ") + msg + L"\n").c_str())
+#define DEBUG_ERROR(msg) OutputDebugStringA((std::string("[ERROR] ") + msg + "\n").c_str())
+#define DEBUG_WARNING(msg) OutputDebugStringA((std::string("[WARNING] ") + msg + "\n").c_str())
+#define DEBUG_SUCCESS(msg) OutputDebugStringA((std::string("[SUCCESS] ") + msg + "\n").c_str())
+// ==================== СИСТЕМА АНИМАЦИИ ====================
+
+// Структура для вершин с анимацией (скиннинг)
+struct AnimatedVertex {
+    XMFLOAT3 position;
+    XMFLOAT3 normal;
+    XMFLOAT2 texcoord;
+    XMFLOAT3 color;
+    BYTE boneIndices[4];      // Индексы костей (максимум 4)
+    float boneWeights[4];     // Веса костей
+
+    AnimatedVertex() : position(0, 0, 0), normal(0, 1, 0), texcoord(0, 0), color(1, 1, 1) {
+        memset(boneIndices, 0, sizeof(boneIndices));
+        memset(boneWeights, 0, sizeof(boneWeights));
     }
 };
 
-struct DialogLine {
-    std::wstring speaker;
-    std::wstring text;
-    HBITMAP speakerFace;    // Портрет говорящего
-    int faceIndex;          // Индекс выражения лица
-};
+// Простая система анимации (без скелета, трансформация всей модели)
+class SimpleAnimator {
+private:
+    XMFLOAT3 startPosition;
+    XMFLOAT3 startRotation;
+    XMFLOAT3 startScale;
 
-struct DialogWindow {
-    bool isActive = false;
-    std::vector<DialogLine> lines;
-    int currentLine = 0;
+    float animationTime = 0.0f;
+    float walkCycleTime = 1.0f;  // Время полного цикла ходьбы
+    bool isWalking = false;
+    bool isLooping = true;
 
-    // Позиция и размеры
-    int x = 100;
-    int y = 600;
-    int width = 1200;
-    int height = 250;
+    // Амплитуды анимации
+    float walkHeightAmplitude = 0.2f;   // Высота шага
+    float walkSwayAmplitude = 0.1f;     // Раскачивание в стороны
+    float walkBobAmplitude = 0.05f;     // Покачивание вверх-вниз
 
-    // Цвета
-    COLORREF bgColor = RGB(30, 30, 40);
-    COLORREF borderColor = RGB(100, 80, 60);
-    COLORREF textColor = RGB(255, 255, 255);
-    COLORREF speakerColor = RGB(220, 180, 100);
-
-    // Анимация текста
-    std::wstring displayedText;
-    DWORD textStartTime = 0;
-    int charsPerSecond = 30;  // Скорость появления текста
-    bool textComplete = false;
-
-    // Портрет
-    int portraitWidth = 180;
-    int portraitHeight = 200;
-    int portraitPadding = 20;
-
-    // Кнопка продолжения
-    bool showContinueButton = true;
-    std::wstring continueText = L"▶ ПРОДОЛЖИТЬ";
-};
-
-// Структуры для игрока
-struct Player {
-    float x = 100.0f;
-    float y = 300.0f;
-    float width = 180.0f;
-    float height = 256.0f;
-    float speed = 5.0f;
-    bool facingRight = true;
-    bool isMoving = false;
-    bool isRunning = false;
-
-    AnimationFrames idleAnimation;
-    AnimationFrames walkAnimation;
-    AnimationFrames runAnimation;
-
-    // Для обратной совместимости 
-    HBITMAP hSpriteRight = nullptr;
-    HBITMAP hSpriteRunRight = nullptr;
-
-    DWORD lastRunTime = 0;
-    DWORD boostStartTime = 0;
-    bool isRunningBoost = false;
-    DWORD idleTimer = 0;
-    bool isIdle = true;
-
-    // Получение текущего спрайта
-    HBITMAP GetCurrentSprite()
-    {
-        if (isRunning && runAnimation.loaded && runAnimation.frames.size() > 0) {
-            return runAnimation.frames[runAnimation.currentFrame];
-        }
-        else if (isMoving && walkAnimation.loaded && walkAnimation.frames.size() > 0) {
-            return walkAnimation.frames[walkAnimation.currentFrame];
-        }
-        else if (idleAnimation.loaded && idleAnimation.frames.size() > 0) {
-            return idleAnimation.frames[idleAnimation.currentFrame];
-        }
-        return nullptr;
+public:
+    void StartWalking() {
+        isWalking = true;
+        animationTime = 0.0f;
     }
 
-    // Обновление анимации
-    void UpdateAnimation(DWORD currentTime) {
-        AnimationFrames* anim = &idleAnimation; // По умолчанию idle
+    void StopWalking() {
+        isWalking = false;
+    }
 
-        if (isRunning && runAnimation.loaded) {
-            anim = &runAnimation;
-            isIdle = false;
-            idleTimer = currentTime;
-        }
-        else if (isMoving && walkAnimation.loaded) {
-            anim = &walkAnimation;
-            isIdle = false;
-            idleTimer = currentTime;
-        }
-        else if (idleAnimation.loaded) {
-            anim = &idleAnimation;
+    void Update(float deltaTime, XMFLOAT3& position, XMFLOAT3& rotation, XMFLOAT3& scale) {
+        if (!isWalking) return;
 
-            // Проверяем, сколько времени игрок стоит
-            if (currentTime - idleTimer > 1000) { // 1 секунда неподвижности
-                isIdle = true;
+        animationTime += deltaTime;
+        if (animationTime > walkCycleTime && isLooping) {
+            animationTime -= walkCycleTime;
+        }
+
+        // Простая синусоидальная анимация ходьбы
+        float t = animationTime / walkCycleTime * XM_2PI;
+
+        // Покачивание вверх-вниз (шаги)
+        float bob = sinf(t * 2.0f) * walkBobAmplitude;
+
+        // Раскачивание из стороны в сторону
+        float sway = sinf(t) * walkSwayAmplitude;
+
+        // Движение ног (визуальный эффект - поднимаем модель немного)
+        float stepHeight = (sinf(t) + 1.0f) * 0.5f * walkHeightAmplitude;
+
+        // Применяем к позиции
+        position.y = startPosition.y + bob + stepHeight;
+        position.x = startPosition.x + sway;
+
+        // Легкий наклон при ходьбе
+        rotation.z = sway * 5.0f;  // Наклон в сторону
+        rotation.x = sinf(t * 2.0f) * 0.1f;  // Легкое покачивание вперед-назад
+    }
+
+    void SetStartTransform(const XMFLOAT3& pos, const XMFLOAT3& rot, const XMFLOAT3& scl) {
+        startPosition = pos;
+        startRotation = rot;
+        startScale = scl;
+    }
+
+    void SetWalkCycleTime(float time) { walkCycleTime = time; }
+    void SetAmplitudes(float height, float sway, float bob) {
+        walkHeightAmplitude = height;
+        walkSwayAmplitude = sway;
+        walkBobAmplitude = bob;
+    }
+
+    bool IsWalking() const { return isWalking; }
+    float GetAnimationTime() const { return animationTime; }
+};
+// ==================== ПОМОЩНИКИ ДЛЯ РАБОТЫ С ФАЙЛАМИ ====================
+class FileSystemHelper {
+public:
+    static std::wstring GetExecutableDirectory() {
+        wchar_t buffer[MAX_PATH];
+        GetModuleFileNameW(nullptr, buffer, MAX_PATH);
+        std::wstring exePath = buffer;
+        size_t pos = exePath.find_last_of(L"\\/");
+        return (pos != std::wstring::npos) ? exePath.substr(0, pos + 1) : L".\\";
+    }
+
+    // Добавляем этот метод
+    static std::wstring FindFile(const std::wstring& filename) {
+        // Попробуем несколько мест
+        std::vector<std::wstring> searchPaths = {
+            filename,  // Прямой путь
+            GetExecutableDirectory() + filename,  // Рядом с EXE
+            GetExecutableDirectory() + L"..\\" + filename,  // На уровень выше
+            GetExecutableDirectory() + L"..\\..\\" + filename,  // На два уровня выше
+        };
+
+        // Также пробуем разные расширения
+        std::vector<std::wstring> extensions = { L"", L".png", L".bmp", L".obj", L".jpg", L".jpeg", L".mtl", L".fbx" };
+
+        for (const auto& path : searchPaths) {
+            for (const auto& ext : extensions) {
+                std::wstring fullPath = path + ext;
+                if (FileExists(fullPath)) {
+                    DEBUG_LOG_W(L"Найден файл: " + fullPath);
+                    return fullPath;
+                }
             }
-            else {
-                // Ещё не прошло время, используем первый кадр idle
-                anim->currentFrame = 0;
-                return;
+        }
+
+        DEBUG_LOG_W(L"Файл не найден: " + filename);
+        return L"";
+    }
+
+    static std::wstring FindImageFile(const std::wstring& baseName) {
+        std::vector<std::wstring> imageExtensions = {
+            L".jpg", L".jpeg", L".png", L".bmp", L".dds", L".tga", L".gif"
+        };
+
+        std::vector<std::wstring> searchPaths = {
+            baseName,  // Прямой путь
+            GetExecutableDirectory() + baseName,
+            GetExecutableDirectory() + L"textures\\" + baseName,
+            GetExecutableDirectory() + L"assets\\" + baseName,
+            GetExecutableDirectory() + L"images\\" + baseName,
+        };
+
+        // Также пробуем различные регистры
+        std::wstring lowerName = baseName;
+        std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
+        std::wstring upperName = baseName;
+        std::transform(upperName.begin(), upperName.end(), upperName.begin(), ::toupper);
+
+        searchPaths.push_back(GetExecutableDirectory() + lowerName);
+        searchPaths.push_back(GetExecutableDirectory() + upperName);
+
+        for (const auto& path : searchPaths) {
+            for (const auto& ext : imageExtensions) {
+                std::wstring fullPath = path + ext;
+                if (FileExists(fullPath)) {
+                    DEBUG_LOG_W(L"Найден файл изображения: " + fullPath);
+                    return fullPath;
+                }
             }
         }
 
-        if (!anim->loaded || anim->frames.empty()) return;
+        DEBUG_LOG_W(L"Файл изображения не найден: " + baseName);
+        return L"";
+    }
 
-        // Для idle-анимации обновляем кадры только если действительно idle
-        if (anim == &idleAnimation && !isIdle) {
-            anim->currentFrame = 0;
-            return;
+    static bool FileExists(const std::wstring& path) {
+        DWORD attrs = GetFileAttributesW(path.c_str());
+        return (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY));
+    }
+
+    static void ListFilesInDirectory(const std::wstring& directory) {
+        DEBUG_LOG_W(L"Содержимое директории: " + directory);
+
+        WIN32_FIND_DATAW findData;
+        HANDLE hFind = FindFirstFileW((directory + L"*").c_str(), &findData);
+
+        if (hFind != INVALID_HANDLE_VALUE) {
+            do {
+                if (!(findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                    DEBUG_LOG_W(L"  " + std::wstring(findData.cFileName));
+                }
+            } while (FindNextFileW(hFind, &findData));
+            FindClose(hFind);
+        }
+    }
+};
+
+// ==================== СТРУКТУРЫ ДАННЫХ ====================
+struct Vertex {
+    XMFLOAT3 position;
+    XMFLOAT3 normal;
+    XMFLOAT2 texcoord;
+    XMFLOAT3 color;
+
+    Vertex() : position(0, 0, 0), normal(0, 1, 0), texcoord(0, 0), color(1, 1, 1) {}
+    Vertex(float px, float py, float pz, float nx, float ny, float nz, float u, float v, float r, float g, float b)
+        : position(px, py, pz), normal(nx, ny, nz), texcoord(u, v), color(r, g, b) {
+    }
+};
+
+struct Texture2D {
+    ID3D11Texture2D* texture = nullptr;
+    ID3D11ShaderResourceView* srv = nullptr;
+    ID3D11SamplerState* samplerState = nullptr;
+    std::wstring filename;
+    int width = 0;
+    int height = 0;
+
+    bool LoadFromFile(ID3D11Device* device, const wchar_t* filename);
+    bool CreateDebugTexture(ID3D11Device* device, const wchar_t* name);
+    bool CreateColorTexture(ID3D11Device* device, const wchar_t* name, float r, float g, float b);
+    void Cleanup();
+};
+
+struct Mesh {
+    std::vector<Vertex> vertices;
+    std::vector<uint32_t> indices;
+    std::string materialName;  // Изменено с textureName на materialName
+    int textureIndex = -1;
+};
+
+// Структура для материала из MTL
+struct Material {
+    std::string name;
+    XMFLOAT3 ambient;
+    XMFLOAT3 diffuse;
+    XMFLOAT3 specular;
+    float shininess;
+    float alpha;
+    std::string textureFilename;
+
+    Material() : ambient(0.2f, 0.2f, 0.2f), diffuse(0.8f, 0.8f, 0.8f),
+        specular(1.0f, 1.0f, 1.0f), shininess(20.0f), alpha(1.0f) {
+    }
+};
+
+// ==================== КЛАСС ЗАГРУЗКИ OBJ И MTL ====================
+class OBJLoader {
+public:
+    static bool Load(const std::wstring& filename, std::vector<Mesh>& meshes, std::map<std::string, Material>& materials) {
+        DEBUG_LOG_W(L"Загрузка OBJ файла: " + filename);
+
+        std::ifstream file(filename);
+        if (!file.is_open()) {
+            DEBUG_LOG_W(L"Не удалось открыть файл: " + filename);
+
+            // Создаем простую кубическую модель как запасной вариант
+            CreateSimpleCubeModel(meshes);
+            return true;
         }
 
-        // Обновляем кадр, если пришло время
-        if (currentTime - anim->lastUpdateTime > anim->frameDelay) {
-            anim->currentFrame = (anim->currentFrame + 1) % anim->frames.size();
-            anim->lastUpdateTime = currentTime;
+        std::vector<XMFLOAT3> positions;
+        std::vector<XMFLOAT3> normals;
+        std::vector<XMFLOAT2> texcoords;
+        std::vector<std::string> mtlFiles;
+
+        Mesh currentMesh;
+        std::string currentMaterial;
+        std::string currentMtlFile;
+
+        std::string line;
+        int lineNum = 0;
+        while (std::getline(file, line)) {
+            lineNum++;
+            std::istringstream iss(line);
+            std::string prefix;
+            iss >> prefix;
+
+            if (prefix == "v") { // Вершина
+                XMFLOAT3 pos;
+                iss >> pos.x >> pos.y >> pos.z;
+                positions.push_back(pos);
+            }
+            else if (prefix == "vn") { // Нормаль
+                XMFLOAT3 norm;
+                iss >> norm.x >> norm.y >> norm.z;
+                normals.push_back(norm);
+            }
+            else if (prefix == "vt") { // Текстурные координаты
+                XMFLOAT2 tex;
+                iss >> tex.x >> tex.y;
+                tex.y = 1.0f - tex.y; // Flip Y для DirectX
+                texcoords.push_back(tex);
+            }
+            else if (prefix == "f") { // Грань (поддержка треугольников, квадов и n-угольников)
+                std::vector<std::string> faceVerts;
+                std::string vert;
+
+                // Считываем ВСЕ вершины грани
+                while (iss >> vert) {
+                    faceVerts.push_back(vert);
+                }
+
+                // Минимум 3 вершины — иначе это не грань
+                if (faceVerts.size() < 3)
+                    continue;
+
+                // Fan triangulation:
+                // (0, i, i+1)
+                for (size_t i = 1; i + 1 < faceVerts.size(); ++i) {
+                    ProcessFace(
+                        faceVerts[0],
+                        positions,
+                        normals,
+                        texcoords,
+                        currentMesh,
+                        currentMaterial,
+                        materials
+                    );
+
+                    ProcessFace(
+                        faceVerts[i],
+                        positions,
+                        normals,
+                        texcoords,
+                        currentMesh,
+                        currentMaterial,
+                        materials
+                    );
+
+                    ProcessFace(
+                        faceVerts[i + 1],
+                        positions,
+                        normals,
+                        texcoords,
+                        currentMesh,
+                        currentMaterial,
+                        materials
+                    );
+                }
+            }
+
+            else if (prefix == "usemtl") { // Материал
+                if (!currentMesh.vertices.empty()) {
+                    currentMesh.materialName = currentMaterial;
+                    meshes.push_back(currentMesh);
+                    currentMesh = Mesh();
+                }
+                iss >> currentMaterial;
+
+                char buffer[256];
+                sprintf_s(buffer, "Строка %d: Используется материал: %s", lineNum, currentMaterial.c_str());
+                DEBUG_LOG(buffer);
+            }
+            else if (prefix == "mtllib") { // Файл материалов
+                std::string mtlFile;
+                iss >> mtlFile;
+                mtlFiles.push_back(mtlFile);
+
+                // Получаем путь к MTL файлу
+                std::wstring objPath = filename;
+                size_t lastSlash = objPath.find_last_of(L"\\/");
+                std::wstring basePath = (lastSlash != std::wstring::npos) ?
+                    objPath.substr(0, lastSlash + 1) : L"";
+
+                std::wstring mtlPath = basePath + std::wstring(mtlFile.begin(), mtlFile.end());
+
+                // Загружаем материалы из MTL файла
+                if (LoadMTL(mtlPath, materials)) {
+                    DEBUG_LOG("MTL файл успешно загружен");
+                }
+                else {
+                    DEBUG_WARNING("Не удалось загрузить MTL файл");
+                }
+            }
+        }
+
+        // Добавляем последний меш
+        if (!currentMesh.vertices.empty()) {
+            currentMesh.materialName = currentMaterial;
+            meshes.push_back(currentMesh);
+        }
+
+        file.close();
+
+        if (meshes.empty()) {
+            CreateSimpleCubeModel(meshes);
+        }
+
+        char buffer[256];
+        sprintf_s(buffer, "OBJ загружен: %zu мешей, %zu вершин в первом меше, %zu материалов",
+            meshes.size(), meshes.empty() ? (size_t)0 : meshes[0].vertices.size(),
+            materials.size());
+        DEBUG_LOG(buffer);
+
+        return !meshes.empty();
+    }
+
+    static bool LoadMTL(const std::wstring& filename, std::map<std::string, Material>& materials) {
+        DEBUG_LOG_W(L"Загрузка MTL файла: " + filename);
+
+        std::ifstream file(filename);
+        if (!file.is_open()) {
+            DEBUG_LOG_W(L"Не удалось открыть MTL файл: " + filename);
+            return false;
+        }
+
+        Material currentMaterial;
+        std::string line;
+
+        while (std::getline(file, line)) {
+            std::istringstream iss(line);
+            std::string prefix;
+            iss >> prefix;
+
+            if (prefix == "newmtl") { // Новый материал
+                if (!currentMaterial.name.empty()) {
+                    materials[currentMaterial.name] = currentMaterial;
+                }
+                iss >> currentMaterial.name;
+                currentMaterial = Material(); // Сброс значений по умолчанию
+                currentMaterial.name = currentMaterial.name;
+
+                DEBUG_LOG("Найден материал: " + currentMaterial.name);
+            }
+            else if (prefix == "Ka") { // Ambient color
+                iss >> currentMaterial.ambient.x >> currentMaterial.ambient.y >> currentMaterial.ambient.z;
+            }
+            else if (prefix == "Kd") { // Diffuse color
+                iss >> currentMaterial.diffuse.x >> currentMaterial.diffuse.y >> currentMaterial.diffuse.z;
+
+                char buffer[256];
+                sprintf_s(buffer, "  Цвет материала %s: (%.3f, %.3f, %.3f)",
+                    currentMaterial.name.c_str(),
+                    currentMaterial.diffuse.x,
+                    currentMaterial.diffuse.y,
+                    currentMaterial.diffuse.z);
+                DEBUG_LOG(buffer);
+            }
+            else if (prefix == "Ks") { // Specular color
+                iss >> currentMaterial.specular.x >> currentMaterial.specular.y >> currentMaterial.specular.z;
+            }
+            else if (prefix == "Ns") { // Shininess
+                iss >> currentMaterial.shininess;
+            }
+            else if (prefix == "d" || prefix == "Tr") { // Alpha (transparency)
+                iss >> currentMaterial.alpha;
+            }
+            else if (prefix == "map_Kd") { // Texture
+                iss >> currentMaterial.textureFilename;
+            }
+        }
+
+        // Добавляем последний материал
+        if (!currentMaterial.name.empty()) {
+            materials[currentMaterial.name] = currentMaterial;
+        }
+
+        file.close();
+
+        char buffer[256];
+        sprintf_s(buffer, "Загружено материалов: %zu", materials.size());
+        DEBUG_LOG(buffer);
+
+        return !materials.empty();
+    }
+
+private:
+    static void ProcessFace(const std::string& faceStr,
+        const std::vector<XMFLOAT3>& positions,
+        const std::vector<XMFLOAT3>& normals,
+        const std::vector<XMFLOAT2>& texcoords,
+        Mesh& mesh,
+        const std::string& currentMaterial,
+        const std::map<std::string, Material>& materials) {
+
+        std::istringstream fss(faceStr);
+        std::string token;
+        int indices[3] = { -1, -1, -1 };
+        int idx = 0;
+
+        while (std::getline(fss, token, '/') && idx < 3) {
+            if (!token.empty()) {
+                indices[idx] = std::stoi(token) - 1; // OBJ индексы начинаются с 1
+            }
+            idx++;
+        }
+
+        Vertex vertex;
+
+        // Позиция
+        if (indices[0] >= 0 && indices[0] < (int)positions.size()) {
+            vertex.position = positions[indices[0]];
+        }
+        else {
+            vertex.position = XMFLOAT3(0, 0, 0);
+        }
+
+        // Текстурные координаты
+        if (indices[1] >= 0 && indices[1] < (int)texcoords.size()) {
+            vertex.texcoord = texcoords[indices[1]];
+        }
+        else {
+            vertex.texcoord = XMFLOAT2(0, 0);
+        }
+
+        // Нормаль
+        if (indices[2] >= 0 && indices[2] < (int)normals.size()) {
+            vertex.normal = normals[indices[2]];
+        }
+        else {
+            // Вычисляем нормаль по умолчанию
+            vertex.normal = XMFLOAT3(0, 1, 0);
+        }
+
+        // Цвет из материала
+        if (!currentMaterial.empty() && materials.find(currentMaterial) != materials.end()) {
+            const Material& mat = materials.at(currentMaterial);
+            vertex.color = mat.diffuse; // Используем диффузный цвет
+
+            // Отладочный вывод для первых вершин
+            static int debugVertexCount = 0;
+            if (debugVertexCount < 10) {
+                char buffer[256];
+                sprintf_s(buffer, "Вершина %d: материал '%s', цвет (%.3f, %.3f, %.3f)",
+                    debugVertexCount, currentMaterial.c_str(),
+                    vertex.color.x, vertex.color.y, vertex.color.z);
+                DEBUG_LOG(buffer);
+                debugVertexCount++;
+            }
+        }
+        else {
+            // Дефолтный цвет (белый)
+            vertex.color = XMFLOAT3(1, 1, 1);
+        }
+
+        mesh.vertices.push_back(vertex);
+        mesh.indices.push_back((uint32_t)mesh.indices.size());
+    }
+
+    static void CreateSimpleCubeModel(std::vector<Mesh>& meshes) {
+        DEBUG_LOG("Создание простой кубической модели...");
+
+        Mesh cubeMesh;
+
+        // Вершины куба (8 вершин)
+        Vertex vertices[] = {
+            // Передняя грань
+            Vertex(-1.0f, -1.0f, -1.0f, 0, 0, -1, 0, 1, 1, 0, 0),
+            Vertex(1.0f, -1.0f, -1.0f, 0, 0, -1, 1, 1, 0, 1, 0),
+            Vertex(1.0f,  1.0f, -1.0f, 0, 0, -1, 1, 0, 0, 0, 1),
+            Vertex(-1.0f,  1.0f, -1.0f, 0, 0, -1, 0, 0, 1, 1, 0),
+
+            // Задняя грань
+            Vertex(-1.0f, -1.0f,  1.0f, 0, 0, 1, 1, 1, 1, 0, 0),
+            Vertex(1.0f, -1.0f,  1.0f, 0, 0, 1, 0, 1, 0, 1, 0),
+            Vertex(1.0f,  1.0f,  1.0f, 0, 0, 1, 0, 0, 0, 0, 1),
+            Vertex(-1.0f,  1.0f,  1.0f, 0, 0, 1, 1, 0, 1, 1, 0),
+        };
+
+        // Индексы куба (12 треугольников)
+        uint32_t indices[] = {
+            // Передняя грань
+            0, 1, 2, 2, 3, 0,
+            // Задняя грань
+            4, 5, 6, 6, 7, 4,
+            // Верхняя грань
+            3, 2, 6, 6, 7, 3,
+            // Нижняя грань
+            0, 1, 5, 5, 4, 0,
+            // Левая грань
+            0, 3, 7, 7, 4, 0,
+            // Правая грань
+            1, 2, 6, 6, 5, 1
+        };
+
+        cubeMesh.vertices.assign(vertices, vertices + 8);
+        cubeMesh.indices.assign(indices, indices + 36);
+        cubeMesh.materialName = "default";
+
+        meshes.push_back(cubeMesh);
+        DEBUG_LOG("Простая кубическая модель создана");
+    }
+};
+
+// ==================== ТЕКСТУРНЫЙ МЕНЕДЖЕР ====================
+class TextureManager {
+private:
+    std::map<std::wstring, Texture2D> textures;
+    ID3D11Device* device = nullptr;
+
+public:
+    void Initialize(ID3D11Device* dev) {
+        device = dev;
+    }
+
+    int LoadTexture(const std::wstring& filename) {
+        // Ищем файл
+        std::wstring foundPath = FileSystemHelper::FindFile(filename);
+        if (foundPath.empty()) {
+            DEBUG_WARNING("Не удалось найти текстуру, создаю дебажную");
+            return CreateDebugTexture(filename);
+        }
+
+        // Проверяем, не загружена ли уже эта текстура
+        auto it = textures.find(foundPath);
+        if (it != textures.end()) {
+            return (int)std::distance(textures.begin(), it);
+        }
+
+        // Загружаем новую текстуру
+        Texture2D texture;
+        if (texture.LoadFromFile(device, foundPath.c_str())) {
+            textures[foundPath] = texture;
+            DEBUG_LOG_W(L"Текстура загружена: " + foundPath);
+            return (int)textures.size() - 1;
+        }
+        else {
+            return CreateDebugTexture(filename);
         }
     }
 
-    // Очистка ресурсов
+    int CreateDebugTexture(const std::wstring& name) {
+        Texture2D texture;
+        if (texture.CreateDebugTexture(device, name.c_str())) {
+            std::wstring debugName = L"[DEBUG]" + name;
+            textures[debugName] = texture;
+            DEBUG_LOG_W(L"Создана дебажная текстура: " + name);
+            return (int)textures.size() - 1;
+        }
+        return -1;
+    }
+
+    int CreateColorTexture(const std::wstring& name, float r, float g, float b) {
+        Texture2D texture;
+        if (texture.CreateColorTexture(device, name.c_str(), r, g, b)) {
+            std::wstring colorName = L"[COLOR]" + name;
+            textures[colorName] = texture;
+
+            char buffer[256];
+            sprintf_s(buffer, "Создана цветная текстура %s: (%.3f, %.3f, %.3f)",
+                std::string(name.begin(), name.end()).c_str(), r, g, b);
+            DEBUG_LOG(buffer);
+
+            return (int)textures.size() - 1;
+        }
+        return -1;
+    }
+
+    Texture2D* GetTexture(int index) {
+        if (index < 0 || index >= (int)textures.size()) return nullptr;
+
+        auto it = textures.begin();
+        std::advance(it, index);
+        return &it->second;
+    }
+
     void Cleanup() {
-        idleAnimation.Clear();
-        walkAnimation.Clear();
-        runAnimation.Clear();
-    }
-};
-
-// Структура для врага
-struct Enemy
-{
-    float x = 1500.0f;  // Позиция на уровне
-    float y = 800.0f;
-    float width = 180.0f;
-    float height = 256.0f;
-    bool isVisible = false;  // Виден только при удержании Q
-    HBITMAP idleSprite = nullptr;  // Статичная картинка
-    bool loaded = false;
-
-    // Для обратной совместимости можно добавить анимацию позже
-    AnimationFrames idleAnimation;
-};
-
-// Состояния боя
-enum BattleState {
-    BATTLE_PLAYER_TURN,    // Ход игрока
-    BATTLE_ENEMY_TURN,     // Ход врага
-    BATTLE_VICTORY,        // Победа
-    BATTLE_DEFEAT,         // Поражение
-    BATTLE_ESCAPED         // Побег
-};
-
-// Действия в бою
-enum BattleAction {
-    ACTION_ATTACK,         // Атака
-    ACTION_DEFEND,         // Защита
-    ACTION_ITEM,           // Использовать предмет
-    ACTION_ESCAPE          // Побег
-};
-
-// Участник боя
-struct BattleParticipant {
-    std::wstring name;
-    int maxHealth = 100;
-    int currentHealth = 100;
-    int attack = 20;
-    int defense = 10;
-    int speed = 15;
-    bool isDefending = false;
-    HBITMAP portrait = nullptr;
-    HBITMAP battleSprite = nullptr;
-    AnimationFrames attackAnimation;
-    AnimationFrames hurtAnimation;
-    AnimationFrames idleAnimation;
-
-    // Для отображения в бою
-    float x = 0;           // Позиция на экране боя
-    float y = 0;
-    float width = 300;
-    float height = 400;
-
-    // Полоска здоровья
-    float healthBarWidth = 200;
-    float healthBarHeight = 20;
-
-    void TakeDamage(int damage) {
-        if (isDefending) {
-            damage = max(1, damage / 2);  // Защита уменьшает урон вдвое
-            isDefending = false;
+        for (auto& pair : textures) {
+            pair.second.Cleanup();
         }
-
-        currentHealth -= damage;
-        if (currentHealth < 0) currentHealth = 0;
-    }
-
-    void Heal(int amount) {
-        currentHealth += amount;
-        if (currentHealth > maxHealth) currentHealth = maxHealth;
-    }
-
-    float GetHealthPercentage() const {
-        return (float)currentHealth / (float)maxHealth;
+        textures.clear();
     }
 };
 
-// Боевая сцена
-struct BattleScene {
-    bool isActive = false;
-    BattleState state = BATTLE_PLAYER_TURN;
-    BattleParticipant player;
-    BattleParticipant enemy;
-
-    // Позиции участников
-    float playerBattleX = 200;     // Игрок слева
-    float playerBattleY = 400;
-    float enemyBattleX = 1400;     // Враг справа
-    float enemyBattleY = 400;
-
-    // Интерфейс боя
-    int selectedAction = 0;        // Выбранное действие (0-3)
-    std::vector<std::wstring> actions = {
-        L"⚔  АТАКА",
-        L"🛡  ЗАЩИТА",
-        L"💊  ПРЕДМЕТ",
-        L"🏃  ПОБЕГ"
-    };
-
-    // Анимации и эффекты
-    bool showDamageText = false;
-    std::wstring damageText;
-    int damageValue = 0;
-    float damageTextX = 0;
-    float damageTextY = 0;
-    DWORD damageTextStartTime = 0;
-
-    // Фон боя
-    HBITMAP background = nullptr;
-
-    // Сообщение в центре экрана
-    std::wstring centerMessage;
-    DWORD messageStartTime = 0;
-    bool showMessage = false;
-
-    // Таймер для автоматического хода врага
-    DWORD enemyTurnStartTime = 0;
-
-    void Reset() {
-        state = BATTLE_PLAYER_TURN;
-        selectedAction = 0;
-        showDamageText = false;
-        showMessage = false;
-        player.isDefending = false;
-        enemy.isDefending = false;
-        enemyTurnStartTime = 0;
-    }
-
-    void ShowMessage(const std::wstring& msg) {
-        centerMessage = msg;
-        messageStartTime = GetTickCount();
-        showMessage = true;
-    }
-
-    void ShowDamage(float x, float y, int damage, const std::wstring& text = L"") {
-        damageTextX = x;
-        damageTextY = y;
-        damageValue = damage;
-        damageText = text.empty() ? std::to_wstring(damage) : text;
-        damageTextStartTime = GetTickCount();
-        showDamageText = true;
-    }
-};
-
-// Глобальные переменные
-struct WindowContext {
-    HWND hWnd = nullptr;
-    int width = 1920;
-    int height = 1080;
-    bool should_exit = false;
-    HWND hStartButton = nullptr;
-    HWND hExitButton = nullptr;
-
-    // Буфер для двойной буферизации
-    HDC hBufferDC = nullptr;
-    HBITMAP hBufferBitmap = nullptr;
-    HBITMAP hOldBufferBitmap = nullptr;
-    int bufferWidth = 0;
-    int bufferHeight = 0;
-};
-
-struct GameState {
-    bool inMainMenu = true;
-    bool inGame = false;
-    bool inBattle = false;
-    int currentLevel = 0;
-    Player player;
-    Enemy enemy;
-    float levelWidth = 3840;
-    float levelHeight = 2000;
-    HBITMAP hLevelBackground = nullptr;
-    float cameraX = 0;
-    float cameraY = 0;
-    bool isMusicPlaying = false;
-
-    // Диалоговая система
-    DialogWindow dialog;
-    HBITMAP playerPortrait = nullptr;
-    HBITMAP npcPortrait = nullptr;
-    bool isDialogActive = false;
-
-    // Боевая система
-    BattleScene battle;
-};
-
-WindowContext g_window;
-GameState g_gameState;
-
-// Цвета
-const COLORREF MENU_BG_COLOR = RGB(20, 25, 35);
-const COLORREF BUTTON_COLOR = RGB(86, 98, 246);
-const COLORREF BUTTON_HOVER_COLOR = RGB(105, 116, 255);
-const COLORREF TEXT_COLOR = RGB(255, 255, 255);
-const COLORREF TRANSPARENT_COLOR = RGB(255, 0, 255); // Маджента - прозрачный
-
-// Прототипы функций ДИАЛОГОВОЙ СИСТЕМЫ
-void StartDialog(const std::wstring& speaker, const std::wstring& text, HBITMAP face = nullptr);
-void StartDialogSequence(const std::vector<DialogLine>& dialogLines);
-void UpdateDialog();
-void RenderDialog(HDC hdc);
-void NextDialogLine();
-void CloseDialog();
-bool IsDialogActive();
-HBITMAP CreatePortrait(int width, int height, COLORREF hairColor, COLORREF skinColor,
-    COLORREF eyeColor, const std::wstring& expression = L"neutral");
-void DrawRoundedRect(HDC hdc, int x, int y, int width, int height,
-    COLORREF fillColor, COLORREF borderColor, int radius = 15);
-void DrawTextWithShadow(HDC hdc, const std::wstring& text, int x, int y,
-    COLORREF textColor, COLORREF shadowColor = RGB(0, 0, 0),
-    int shadowOffset = 2);
-
-// ОСНОВНЫЕ ПРОТОТИПЫ
-LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
-void CreateMainMenuButtons();
-void ShowMainMenuButtons(bool show);
-void Cleanup();
-void OnStartGame();
-void OnExitGame();
-HBITMAP LoadBmpFromDebug(const char* filename);
-void InitLevel1();
-void RenderMainMenu(HDC hdc);
-void RenderGame(HDC hdc);
-void CustomizeButton(HWND hwndButton);
-void ProcessInput();
-void UpdatePlayer();
-void RenderPlayer(HDC hdc);
-void LimitPlayerOnGround();
-void UpdateCamera();
-void InitBuffer(HDC hdc);
-void CleanupBuffer();
-void PlayBackgroundMusic(const char* filename);
-void StopBackgroundMusic();
-void ToggleMusicPause();
-void LoadWalkAnimation(Player& player, const std::vector<std::string>& rightFiles, DWORD frameDelay = 120);
-void LoadRunAnimation(Player& player, const std::vector<std::string>& rightFiles, DWORD frameDelay = 100);
-void LoadIdleAnimation(Player& player, const std::vector<std::string>& rightFiles, DWORD frameDelay = 200);
-void LoadEnemy(Enemy& enemy);
-void RenderEnemy(HDC hdc);
-
-// БОЕВАЯ СИСТЕМА
-bool CheckCollision(float x1, float y1, float w1, float h1,
-    float x2, float y2, float w2, float h2);
-void UpdateGameLogic();
-void LoadBattleResources();
-void StartBattle();
-void EndBattle(bool victory);
-void ProcessPlayerTurn(int action);
-void ProcessEnemyTurn();
-void UpdateBattle();
-void RenderBattle(HDC hdc);
-
-// ==================== РЕАЛИЗАЦИЯ ДИАЛОГОВОЙ СИСТЕМЫ ====================
-
-bool IsDialogActive() {
-    return g_gameState.dialog.isActive;
-}
-
-void StartDialog(const std::wstring& speaker, const std::wstring& text, HBITMAP face) {
-    DialogLine line;
-    line.speaker = speaker;
-    line.text = text;
-    line.speakerFace = face;
-    line.faceIndex = 0;
-
-    g_gameState.dialog.lines.clear();
-    g_gameState.dialog.lines.push_back(line);
-    g_gameState.dialog.currentLine = 0;
-    g_gameState.dialog.isActive = true;
-    g_gameState.isDialogActive = true;
-    g_gameState.dialog.displayedText = L"";
-    g_gameState.dialog.textStartTime = GetTickCount();
-    g_gameState.dialog.textComplete = false;
-}
-
-void StartDialogSequence(const std::vector<DialogLine>& dialogLines) {
-    g_gameState.dialog.lines = dialogLines;
-    g_gameState.dialog.currentLine = 0;
-    g_gameState.dialog.isActive = true;
-    g_gameState.isDialogActive = true;
-    g_gameState.dialog.displayedText = L"";
-    g_gameState.dialog.textStartTime = GetTickCount();
-    g_gameState.dialog.textComplete = false;
-}
-
-void UpdateDialog() {
-    if (!g_gameState.dialog.isActive || g_gameState.dialog.lines.empty()) return;
-
-    DialogWindow& dialog = g_gameState.dialog;
-    const DialogLine& currentLine = dialog.lines[dialog.currentLine];
-
-    if (dialog.textComplete) return;
-
-    DWORD currentTime = GetTickCount();
-    DWORD elapsedTime = currentTime - dialog.textStartTime;
-
-    // Вычисляем сколько символов должно отобразиться
-    int targetChars = (elapsedTime * dialog.charsPerSecond) / 1000;
-
-    if (targetChars > (int)currentLine.text.length()) {
-        dialog.displayedText = currentLine.text;
-        dialog.textComplete = true;
-    }
-    else {
-        dialog.displayedText = currentLine.text.substr(0, targetChars);
-    }
-}
-
-HBITMAP CreatePortrait(int width, int height, COLORREF hairColor,
-    COLORREF skinColor, COLORREF eyeColor,
-    const std::wstring& expression) {
-
-    // Создаем DC и битмап
-    HDC screenDC = GetDC(NULL);
-    HDC memDC = CreateCompatibleDC(screenDC);
-
-    // Создаем битмап с поддержкой альфа-канала (32-bit)
-    BITMAPINFO bmi = { 0 };
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = width;
-    bmi.bmiHeader.biHeight = -height;  // Отрицательная высота = сверху вниз
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;     // 32 бита на пиксель
-    bmi.bmiHeader.biCompression = BI_RGB;
-
-    void* pBits = NULL;
-    HBITMAP bitmap = CreateDIBSection(screenDC, &bmi, DIB_RGB_COLORS, &pBits, NULL, 0);
-
-    if (!bitmap) {
-        DeleteDC(memDC);
-        ReleaseDC(NULL, screenDC);
-        return NULL;
-    }
-
-    HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, bitmap);
-
-    // Заливаем фон прозрачным цветом (маджента)
-    HBRUSH bgBrush = CreateSolidBrush(TRANSPARENT_COLOR);
-    RECT rect = { 0, 0, width, height };
-    FillRect(memDC, &rect, bgBrush);
-    DeleteObject(bgBrush);
-
-    // === Рисуем голову (овал) ===
-    HBRUSH headBrush = CreateSolidBrush(skinColor);
-    HPEN headPen = CreatePen(PS_SOLID, 2, RGB(
-        GetRValue(skinColor) * 0.7f,
-        GetGValue(skinColor) * 0.7f,
-        GetBValue(skinColor) * 0.7f
-    ));
-
-    HPEN oldPen = (HPEN)SelectObject(memDC, headPen);
-    HBRUSH oldBrush = (HBRUSH)SelectObject(memDC, headBrush);
-
-    int headWidth = width * 2 / 3;
-    int headHeight = height * 3 / 5;
-    int headX = (width - headWidth) / 2;
-    int headY = height / 6;
-
-    // Рисуем голову
-    Ellipse(memDC, headX, headY, headX + headWidth, headY + headHeight);
-
-    // === Рисуем волосы ===
-    HBRUSH hairBrush = CreateSolidBrush(hairColor);
-    SelectObject(memDC, hairBrush);
-
-    int hairTop = headY - headHeight / 8;
-    int hairHeight = headHeight / 2;
-    Ellipse(memDC, headX - 10, hairTop, headX + headWidth + 10, hairTop + hairHeight);
-
-    // === Рисуем глаза ===
-    HBRUSH eyeBrush = CreateSolidBrush(eyeColor);
-    SelectObject(memDC, eyeBrush);
-
-    int eyeSize = headWidth / 6;
-    int eyeY = headY + headHeight / 3;
-
-    // Левый глаз
-    int leftEyeX = headX + headWidth / 3 - eyeSize / 2;
-    Ellipse(memDC, leftEyeX, eyeY, leftEyeX + eyeSize, eyeY + eyeSize);
-
-    // Правый глаз
-    int rightEyeX = headX + headWidth * 2 / 3 - eyeSize / 2;
-    Ellipse(memDC, rightEyeX, eyeY, rightEyeX + eyeSize, eyeY + eyeSize);
-
-    // Зрачки
-    HBRUSH pupilBrush = CreateSolidBrush(RGB(0, 0, 0));
-    SelectObject(memDC, pupilBrush);
-    int pupilSize = eyeSize / 2;
-
-    // Левый зрачок
-    Ellipse(memDC,
-        leftEyeX + pupilSize / 2,
-        eyeY + pupilSize / 2,
-        leftEyeX + pupilSize / 2 + pupilSize,
-        eyeY + pupilSize / 2 + pupilSize);
-
-    // Правый зрачок
-    Ellipse(memDC,
-        rightEyeX + pupilSize / 2,
-        eyeY + pupilSize / 2,
-        rightEyeX + pupilSize / 2 + pupilSize,
-        eyeY + pupilSize / 2 + pupilSize);
-
-    // === Рисуем рот ===
-    HPEN mouthPen = NULL;
-    if (expression == L"happy") {
-        // Улыбка
-        mouthPen = CreatePen(PS_SOLID, 3, RGB(200, 100, 100));
-        SelectObject(memDC, mouthPen);
-        Arc(memDC,
-            leftEyeX, eyeY + eyeSize,
-            rightEyeX + eyeSize, eyeY + eyeSize * 2,
-            leftEyeX, eyeY + eyeSize * 1.5,
-            rightEyeX + eyeSize, eyeY + eyeSize * 1.5);
-    }
-    else if (expression == L"sad") {
-        // Грустный рот
-        mouthPen = CreatePen(PS_SOLID, 3, RGB(100, 100, 200));
-        SelectObject(memDC, mouthPen);
-        Arc(memDC,
-            leftEyeX, eyeY + eyeSize * 2,
-            rightEyeX + eyeSize, eyeY + eyeSize,
-            leftEyeX, eyeY + eyeSize * 1.5,
-            rightEyeX + eyeSize, eyeY + eyeSize * 1.5);
-    }
-    else {
-        // Нейтральный рот
-        mouthPen = CreatePen(PS_SOLID, 2, RGB(150, 80, 80));
-        SelectObject(memDC, mouthPen);
-        MoveToEx(memDC, leftEyeX + eyeSize / 3, eyeY + eyeSize * 1.5, NULL);
-        LineTo(memDC, rightEyeX + eyeSize / 3, eyeY + eyeSize * 1.5);
-    }
-
-    // === Рисуем нос ===
-    HPEN nosePen = CreatePen(PS_SOLID, 2, RGB(
-        GetRValue(skinColor) * 0.7f,
-        GetGValue(skinColor) * 0.7f,
-        GetBValue(skinColor) * 0.7f
-    ));
-    SelectObject(memDC, nosePen);
-    int noseX = headX + headWidth / 2;
-    int noseY = eyeY + eyeSize + eyeSize / 4;
-    MoveToEx(memDC, noseX, noseY, NULL);
-    LineTo(memDC, noseX, noseY + eyeSize / 2);
-
-    // === Одежда (простой воротник) ===
-    HBRUSH clothesBrush = CreateSolidBrush(RGB(80, 60, 40));
-    SelectObject(memDC, clothesBrush);
-
-    RECT clothesRect = {
-        headX - 5, headY + headHeight - 10,
-        headX + headWidth + 5, headY + headHeight + 20
-    };
-    RoundRect(memDC, clothesRect.left, clothesRect.top,
-        clothesRect.right, clothesRect.bottom, 10, 10);
-
-    // === Очистка ===
-    SelectObject(memDC, oldPen);
-    SelectObject(memDC, oldBrush);
-
-    // Удаляем GDI объекты
-    DeleteObject(headBrush);
-    DeleteObject(hairBrush);
-    DeleteObject(eyeBrush);
-    DeleteObject(pupilBrush);
-    DeleteObject(clothesBrush);
-    DeleteObject(headPen);
-    DeleteObject(mouthPen);
-    DeleteObject(nosePen);
-
-    // Восстанавливаем и возвращаем
-    SelectObject(memDC, oldBmp);
-    DeleteDC(memDC);
-    ReleaseDC(NULL, screenDC);
-
-    return bitmap;
-}
-
-void DrawRoundedRect(HDC hdc, int x, int y, int width, int height,
-    COLORREF fillColor, COLORREF borderColor, int radius) {
-    // Создаем перо и кисть
-    HPEN borderPen = CreatePen(PS_SOLID, 2, borderColor);
-    HBRUSH fillBrush = CreateSolidBrush(fillColor);
-
-    // Сохраняем старые
-    HPEN oldPen = (HPEN)SelectObject(hdc, borderPen);
-    HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, fillBrush);
-
-    // Рисуем закругленный прямоугольник
-    RoundRect(hdc, x, y, x + width, y + height, radius, radius);
-
-    // Восстанавливаем
-    SelectObject(hdc, oldPen);
-    SelectObject(hdc, oldBrush);
-
-    // Удаляем GDI объекты
-    DeleteObject(borderPen);
-    DeleteObject(fillBrush);
-}
-
-void DrawTextWithShadow(HDC hdc, const std::wstring& text, int x, int y,
-    COLORREF textColor, COLORREF shadowColor, int shadowOffset) {
-    COLORREF oldColor = SetTextColor(hdc, shadowColor);
-    TextOut(hdc, x + shadowOffset, y + shadowOffset, text.c_str(), (int)text.length());
-
-    SetTextColor(hdc, textColor);
-    TextOut(hdc, x, y, text.c_str(), (int)text.length());
-
-    SetTextColor(hdc, oldColor);
-}
-
-void RenderDialog(HDC hdc) {
-    if (!g_gameState.dialog.isActive || g_gameState.dialog.lines.empty()) return;
-
-    DialogWindow& dialog = g_gameState.dialog;
-    const DialogLine& currentLine = dialog.lines[dialog.currentLine];
-
-    // Сохраняем текущие настройки DC
-    int oldBkMode = SetBkMode(hdc, TRANSPARENT);
-    COLORREF oldTextColor = SetTextColor(hdc, dialog.textColor);
-    HFONT oldFont = (HFONT)GetCurrentObject(hdc, OBJ_FONT);  // Сохраняем текущий шрифт
-
-    // === Отрисовка фона диалогового окна ===
-    DrawRoundedRect(hdc, dialog.x, dialog.y, dialog.width, dialog.height,
-        dialog.bgColor, dialog.borderColor);
-
-    // === Отрисовка портрета говорящего ===
-    int portraitX = dialog.x + dialog.portraitPadding;
-    int portraitY = dialog.y + (dialog.height - dialog.portraitHeight) / 2;
-
-    if (currentLine.speakerFace) {
-        // Рисуем портрет
-        HDC memDC = CreateCompatibleDC(hdc);
-        HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, currentLine.speakerFace);
-
-        // Рамка вокруг портрета
-        DrawRoundedRect(hdc, portraitX - 5, portraitY - 5,
-            dialog.portraitWidth + 10, dialog.portraitHeight + 10,
-            dialog.borderColor, RGB(150, 120, 90));
-
-        // Сам портрет
-        TransparentBlt(hdc, portraitX, portraitY, dialog.portraitWidth, dialog.portraitHeight,
-            memDC, 0, 0, dialog.portraitWidth, dialog.portraitHeight, TRANSPARENT_COLOR);
-
-        SelectObject(memDC, oldBmp);
-        DeleteDC(memDC);
-    }
-    else {
-        // Запасной портрет если нет изображения
-        DrawRoundedRect(hdc, portraitX, portraitY,
-            dialog.portraitWidth, dialog.portraitHeight,
-            RGB(100, 100, 120), dialog.borderColor);
-
-        // Имя говорящего в портрете (только если нет изображения)
-        HFONT portraitFont = CreateFont(24, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            DEFAULT_QUALITY, DEFAULT_PITCH, L"Arial");
-        HFONT oldPortraitFont = (HFONT)SelectObject(hdc, portraitFont);
-
-        SetTextColor(hdc, RGB(255, 255, 255));
-        RECT portraitTextRect = { portraitX, portraitY + dialog.portraitHeight / 2 - 20,
-                                portraitX + dialog.portraitWidth, portraitY + dialog.portraitHeight / 2 + 20 };
-        DrawText(hdc, L"???", -1, &portraitTextRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-        SelectObject(hdc, oldPortraitFont);
-        DeleteObject(portraitFont);
-    }
-
-    // === Отрисовка текстовой области ===
-    int textAreaX = portraitX + dialog.portraitWidth + dialog.portraitPadding * 2;
-    int textAreaY = dialog.y + dialog.portraitPadding;
-    int textAreaWidth = dialog.width - textAreaX - dialog.portraitPadding;
-    int textAreaHeight = dialog.height - dialog.portraitPadding * 2;
-
-    // Фон текстовой области
-    DrawRoundedRect(hdc, textAreaX, textAreaY, textAreaWidth, textAreaHeight,
-        RGB(40, 40, 50), RGB(80, 60, 40));
-
-    // === Отрисовка имени говорящего ===
-    HFONT speakerFont = CreateFont(28, 0, 0, 0, FW_BOLD, TRUE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Georgia");
-    SelectObject(hdc, speakerFont);
-
-    SetTextColor(hdc, dialog.speakerColor);
-    RECT speakerRect = { textAreaX + 20, textAreaY + 15,
-                       textAreaX + textAreaWidth - 20, textAreaY + 60 };
-
-    // Имя говорящего (только один раз!)
-    DrawText(hdc, currentLine.speaker.c_str(), -1, &speakerRect,
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-    // === Отрисовка текста диалога ===
-    HFONT dialogFont = CreateFont(22, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-    SelectObject(hdc, dialogFont);
-    DeleteObject(speakerFont);  // Удаляем шрифт имени после использования
-
-    SetTextColor(hdc, dialog.textColor);
-    RECT textRect = { textAreaX + 25, textAreaY + 70,
-                    textAreaX + textAreaWidth - 25, textAreaY + textAreaHeight - 50 };
-
-    // Рисуем анимированный текст
-    if (dialog.displayedText.length() > 0) {
-        DrawText(hdc, dialog.displayedText.c_str(), -1, &textRect,
-            DT_LEFT | DT_TOP | DT_WORDBREAK);
-    }
-
-    // === Отрисовка индикатора продолжения ===
-    if (dialog.textComplete && dialog.showContinueButton) {
-        HFONT continueFont = CreateFont(18, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            DEFAULT_QUALITY, DEFAULT_PITCH, L"Arial");
-        SelectObject(hdc, continueFont);
-
-        // Мигающая анимация
-        bool showIndicator = ((GetTickCount() / 500) % 2) == 0;
-
-        if (showIndicator) {
-            SetTextColor(hdc, RGB(220, 180, 100));
-            RECT continueRect = { textAreaX + textAreaWidth - 150, textAreaY + textAreaHeight - 40,
-                                textAreaX + textAreaWidth - 20, textAreaY + textAreaHeight - 10 };
-            DrawText(hdc, dialog.continueText.c_str(), -1, &continueRect,
-                DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-        }
-
-        DeleteObject(continueFont);
-    }
-
-    // Восстанавливаем настройки
-    SelectObject(hdc, oldFont);    // Восстанавливаем исходный шрифт
-    DeleteObject(dialogFont);      // Удаляем диалоговый шрифт
-    SetBkMode(hdc, oldBkMode);
-    SetTextColor(hdc, oldTextColor);
-}
-
-void NextDialogLine() {
-    DialogWindow& dialog = g_gameState.dialog;
-
-    if (!dialog.textComplete) {
-        // Пропускаем анимацию текста
-        dialog.displayedText = dialog.lines[dialog.currentLine].text;
-        dialog.textComplete = true;
-        return;
-    }
-
-    dialog.currentLine++;
-
-    if (dialog.currentLine >= (int)dialog.lines.size()) {
-        CloseDialog();
-    }
-    else {
-        // Начинаем новую строку
-        dialog.displayedText = L"";
-        dialog.textStartTime = GetTickCount();
-        dialog.textComplete = false;
-    }
-}
-
-void CloseDialog() {
-    g_gameState.dialog.isActive = false;
-    g_gameState.isDialogActive = false;
-    g_gameState.dialog.lines.clear();
-    g_gameState.dialog.currentLine = 0;
-}
-
-// ==================== ОСНОВНЫЕ ФУНКЦИИ ====================
-
-void PlayBackgroundMusic(const char* filename)
-{
-    StopBackgroundMusic();
-
-    OutputDebugStringA("=== ЗАПУСК МУЗЫКИ ===\n");
-
-    char debug[512];
-    sprintf_s(debug, "Ищем файл: %s\n", filename);
-    OutputDebugStringA(debug);
+// ==================== ЗАГРУЗКА ТЕКСТУР ====================
+bool Texture2D::LoadFromFile(ID3D11Device* device, const wchar_t* filename) {
+    this->filename = filename;
 
     // Проверяем существование файла
-    DWORD attr = GetFileAttributesA(filename);
-    if (attr == INVALID_FILE_ATTRIBUTES)
-    {
-        sprintf_s(debug, "Файл не найден напрямую: %s\n", filename);
-        OutputDebugStringA(debug);
-        return;
+    if (!FileSystemHelper::FileExists(filename)) {
+        DEBUG_LOG_W(L"Файл не существует: " + std::wstring(filename));
+        return false;
     }
 
-    // Получаем размер файла
-    HANDLE hFile = CreateFileA(filename, GENERIC_READ, FILE_SHARE_READ,
-        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile != INVALID_HANDLE_VALUE)
-    {
-        DWORD fileSize = GetFileSize(hFile, NULL);
-        CloseHandle(hFile);
-        sprintf_s(debug, "Размер файла: %lu байт (%.1f KB)\n", fileSize, fileSize / 1024.0f);
-        OutputDebugStringA(debug);
+    DEBUG_LOG_W(L"Загрузка текстуры: " + std::wstring(filename));
 
-        if (fileSize == 0)
-        {
-            OutputDebugStringA("Файл пустой!\n");
-            return;
-        }
+    // Инициализируем COM для WIC
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
+        DEBUG_ERROR("Ошибка инициализации COM");
+        return false;
     }
 
-    // 1. Пробуем через PlaySound (самый простой способ)
-    OutputDebugStringA("1. Пробуем PlaySound...\n");
-    if (PlaySoundA(filename, NULL, SND_ASYNC | SND_LOOP | SND_FILENAME | SND_NODEFAULT))
-    {
-        OutputDebugStringA("PlaySound УСПЕХ! Музыка должна играть\n");
-        g_gameState.isMusicPlaying = true;
-        return;
-    }
-    else
-    {
-        DWORD err = GetLastError();
-        sprintf_s(debug, "PlaySound ошибка: %lu\n", err);
-        OutputDebugStringA(debug);
+    IWICImagingFactory* wicFactory = nullptr;
+    hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr,
+        CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wicFactory));
+    if (FAILED(hr)) {
+        DEBUG_ERROR("Ошибка создания WIC фабрики");
+        CoUninitialize();
+        return false;
     }
 
-    // 2. Пробуем через MCI
-    OutputDebugStringA("2. Пробуем MCI...\n");
-
-    // Сначала закрываем, если что-то было открыто
-    mciSendStringA("close all", NULL, 0, NULL);
-
-    // Открываем файл
-    std::string openCmd = "open \"";
-    openCmd += filename;
-    openCmd += "\" type waveaudio alias bgmusic";
-
-    MCIERROR mciError = mciSendStringA(openCmd.c_str(), NULL, 0, NULL);
-    if (mciError != 0)
-    {
-        char mciErrorMsg[256];
-        mciGetErrorStringA(mciError, mciErrorMsg, sizeof(mciErrorMsg));
-        sprintf_s(debug, "MCI open ошибка: %s (код: %lu)\n", mciErrorMsg, mciError);
-        OutputDebugStringA(debug);
-
-        // Пробуем как mpegvideo (для mp3)
-        openCmd = "open \"";
-        openCmd += filename;
-        openCmd += "\" type mpegvideo alias bgmusic";
-
-        mciError = mciSendStringA(openCmd.c_str(), NULL, 0, NULL);
-        if (mciError != 0)
-        {
-            mciGetErrorStringA(mciError, mciErrorMsg, sizeof(mciErrorMsg));
-            sprintf_s(debug, "MCI mpegvideo тоже ошибка: %s\n", mciErrorMsg);
-            OutputDebugStringA(debug);
-            return;
-        }
+    IWICBitmapDecoder* decoder = nullptr;
+    hr = wicFactory->CreateDecoderFromFilename(filename, nullptr,
+        GENERIC_READ,
+        WICDecodeMetadataCacheOnLoad,
+        &decoder);
+    if (FAILED(hr)) {
+        DEBUG_ERROR("Ошибка создания декодера");
+        wicFactory->Release();
+        CoUninitialize();
+        return false;
     }
 
-    OutputDebugStringA("MCI файл открыт успешно\n");
-
-    // Получаем информацию о файле
-    char info[256];
-    mciSendStringA("status bgmusic length", info, sizeof(info), NULL);
-    sprintf_s(debug, "Длина трека: %s мс\n", info);
-    OutputDebugStringA(debug);
-
-    mciSendStringA("status bgmusic mode", info, sizeof(info), NULL);
-    sprintf_s(debug, "Режим: %s\n", info);
-    OutputDebugStringA(debug);
-
-    // Устанавливаем громкость на максимум
-    mciSendStringA("setaudio bgmusic volume to 1000", NULL, 0, NULL);
-
-    // Запускаем с повторением
-    mciError = mciSendStringA("play bgmusic repeat", NULL, 0, NULL);
-    if (mciError != 0)
-    {
-        char mciErrorMsg[256];
-        mciGetErrorStringA(mciError, mciErrorMsg, sizeof(mciErrorMsg));
-        sprintf_s(debug, "MCI play ошибка: %s\n", mciErrorMsg);
-        OutputDebugStringA(debug);
-
-        // Пробуем без repeat
-        mciError = mciSendStringA("play bgmusic", NULL, 0, NULL);
-        if (mciError == 0)
-        {
-            OutputDebugStringA("MCI запущен без повторения\n");
-            g_gameState.isMusicPlaying = true;
-        }
-        return;
+    IWICBitmapFrameDecode* frame = nullptr;
+    hr = decoder->GetFrame(0, &frame);
+    if (FAILED(hr)) {
+        DEBUG_ERROR("Ошибка получения фрейма");
+        decoder->Release();
+        wicFactory->Release();
+        CoUninitialize();
+        return false;
     }
 
-    OutputDebugStringA("MCI музыка запущена с повторением\n");
-    g_gameState.isMusicPlaying = true;
+    // Получаем размеры
+    UINT w, h;
+    frame->GetSize(&w, &h);
+    width = (int)w;
+    height = (int)h;
 
-    OutputDebugStringA("=== МУЗЫКА ЗАПУЩЕНА ===\n");
+    // Конвертируем в RGBA
+    IWICFormatConverter* converter = nullptr;
+    hr = wicFactory->CreateFormatConverter(&converter);
+    if (FAILED(hr)) {
+        DEBUG_ERROR("Ошибка создания конвертера");
+        frame->Release();
+        decoder->Release();
+        wicFactory->Release();
+        CoUninitialize();
+        return false;
+    }
+
+    hr = converter->Initialize(frame, GUID_WICPixelFormat32bppRGBA,
+        WICBitmapDitherTypeNone, nullptr, 0.0,
+        WICBitmapPaletteTypeCustom);
+    if (FAILED(hr)) {
+        DEBUG_ERROR("Ошибка инициализации конвертера");
+        converter->Release();
+        frame->Release();
+        decoder->Release();
+        wicFactory->Release();
+        CoUninitialize();
+        return false;
+    }
+
+    // Копируем пиксели
+    std::vector<BYTE> pixels(width * height * 4);
+    hr = converter->CopyPixels(nullptr, width * 4,
+        (UINT)pixels.size(), pixels.data());
+    if (FAILED(hr)) {
+        DEBUG_ERROR("Ошибка копирования пикселей");
+        converter->Release();
+        frame->Release();
+        decoder->Release();
+        wicFactory->Release();
+        CoUninitialize();
+        return false;
+    }
+
+    // Создаем текстуру DirectX
+    D3D11_TEXTURE2D_DESC texDesc = {};
+    texDesc.Width = width;
+    texDesc.Height = height;
+    texDesc.MipLevels = 1;
+    texDesc.ArraySize = 1;
+    texDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.SampleDesc.Quality = 0;
+    texDesc.Usage = D3D11_USAGE_DEFAULT;
+    texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    texDesc.CPUAccessFlags = 0;
+
+    D3D11_SUBRESOURCE_DATA initData = {};
+    initData.pSysMem = pixels.data();
+    initData.SysMemPitch = width * 4;
+    initData.SysMemSlicePitch = 0;
+
+    hr = device->CreateTexture2D(&texDesc, &initData, &texture);
+    if (FAILED(hr)) {
+        DEBUG_ERROR("Ошибка создания текстуры DirectX");
+        converter->Release();
+        frame->Release();
+        decoder->Release();
+        wicFactory->Release();
+        CoUninitialize();
+        return false;
+    }
+
+    // Создаем шейдерный ресурс
+    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Format = texDesc.Format;
+    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MostDetailedMip = 0;
+    srvDesc.Texture2D.MipLevels = 1;
+
+    hr = device->CreateShaderResourceView(texture, &srvDesc, &srv);
+    if (FAILED(hr)) {
+        DEBUG_ERROR("Ошибка создания SRV");
+        texture->Release();
+        converter->Release();
+        frame->Release();
+        decoder->Release();
+        wicFactory->Release();
+        CoUninitialize();
+        return false;
+    }
+
+    // Создаем сэмплер
+    D3D11_SAMPLER_DESC sampDesc = {};
+    sampDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    sampDesc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
+    sampDesc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
+    sampDesc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+    sampDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+    sampDesc.MinLOD = 0;
+    sampDesc.MaxLOD = D3D11_FLOAT32_MAX;
+
+    hr = device->CreateSamplerState(&sampDesc, &samplerState);
+    if (FAILED(hr)) {
+        DEBUG_ERROR("Ошибка создания сэмплера");
+        srv->Release();
+        texture->Release();
+        converter->Release();
+        frame->Release();
+        decoder->Release();
+        wicFactory->Release();
+        CoUninitialize();
+        return false;
+    }
+
+    // Освобождаем ресурсы
+    converter->Release();
+    frame->Release();
+    decoder->Release();
+    wicFactory->Release();
+    CoUninitialize();
+
+    char buffer[256];
+    sprintf_s(buffer, "Текстура загружена успешно: %dx%d", width, height);
+    DEBUG_SUCCESS(buffer);
+
+    return true;
 }
 
-void StopBackgroundMusic()
-{
-    if (g_gameState.isMusicPlaying)
-    {
-        mciSendStringA("stop bgmusic", NULL, 0, NULL);
-        mciSendStringA("close bgmusic", NULL, 0, NULL);
-        g_gameState.isMusicPlaying = false;
-        OutputDebugStringA("Музыка остановлена\n");
-    }
-}
-
-void DrawMirroredBitmap(HDC hdc, int x, int y, int width, int height,
-    HDC memDC, HBITMAP hBitmap, int srcWidth, int srcHeight)
-{
-    HDC mirrorDC = CreateCompatibleDC(hdc);
-    HBITMAP hMirrorBmp = CreateCompatibleBitmap(hdc, srcWidth, srcHeight);
-    HBITMAP hOldMirrorBmp = (HBITMAP)SelectObject(mirrorDC, hMirrorBmp);
-
-    HBITMAP hOldBmp = (HBITMAP)SelectObject(memDC, hBitmap);
-    BitBlt(mirrorDC, 0, 0, srcWidth, srcHeight, memDC, 0, 0, SRCCOPY);
-
-    StretchBlt(mirrorDC, srcWidth - 1, 0, -srcWidth, srcHeight,
-        mirrorDC, 0, 0, srcWidth, srcHeight, SRCCOPY);
-
-    TransparentBlt(hdc, x, y, width, height,
-        mirrorDC, 0, 0, srcWidth, srcHeight, TRANSPARENT_COLOR);
-
-    SelectObject(mirrorDC, hOldMirrorBmp);
-    SelectObject(memDC, hOldBmp);
-    DeleteObject(hMirrorBmp);
-    DeleteDC(mirrorDC);
-}
-
-void InitBuffer(HDC hdc)
-{
-    if (g_window.hBufferDC)
-        CleanupBuffer();
-
-    g_window.hBufferDC = CreateCompatibleDC(hdc);
-    g_window.hBufferBitmap = CreateCompatibleBitmap(hdc, g_window.width, g_window.height);
-    g_window.hOldBufferBitmap = (HBITMAP)SelectObject(g_window.hBufferDC, g_window.hBufferBitmap);
-    g_window.bufferWidth = g_window.width;
-    g_window.bufferHeight = g_window.height;
-}
-
-void CleanupBuffer()
-{
-    if (g_window.hBufferDC)
-    {
-        if (g_window.hOldBufferBitmap)
-        {
-            SelectObject(g_window.hBufferDC, g_window.hOldBufferBitmap);
-            g_window.hOldBufferBitmap = nullptr;
-        }
-
-        if (g_window.hBufferBitmap)
-        {
-            DeleteObject(g_window.hBufferBitmap);
-            g_window.hBufferBitmap = nullptr;
-        }
-
-        DeleteDC(g_window.hBufferDC);
-        g_window.hBufferDC = nullptr;
-    }
-}
-
-// ==================== ВРАГ ====================
-
-void LoadEnemy(Enemy& enemy)
-{
-    OutputDebugStringA("=== ЗАГРУЗКА ВРАГА ===\n");
-
-    // Загружаем статичный спрайт врага
-    enemy.idleSprite = LoadBmpFromDebug("enemy_idle.bmp");
-
-    if (enemy.idleSprite) {
-        enemy.loaded = true;
-        OutputDebugStringA("Спрайт врага загружен успешно\n");
-
-        // Проверяем размеры
-        BITMAP bm;
-        if (GetObject(enemy.idleSprite, sizeof(BITMAP), &bm)) {
-            char debugMsg[512];
-            sprintf_s(debugMsg, "Размер спрайта врага: %dx%d\n", bm.bmWidth, bm.bmHeight);
-            OutputDebugStringA(debugMsg);
-        }
-    }
-    else {
-        OutputDebugStringA("Не удалось загрузить спрайт врага. Создаем временный...\n");
-
-        // Создаем временный спрайт врага (красный прямоугольник)
-        HDC screenDC = GetDC(NULL);
-        HDC memDC = CreateCompatibleDC(screenDC);
-
-        BITMAPINFO bmi = { 0 };
-        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        bmi.bmiHeader.biWidth = (int)enemy.width;
-        bmi.bmiHeader.biHeight = -(int)enemy.height;  // Отрицательная высота
-        bmi.bmiHeader.biPlanes = 1;
-        bmi.bmiHeader.biBitCount = 32;
-        bmi.bmiHeader.biCompression = BI_RGB;
-
-        void* pBits = NULL;
-        enemy.idleSprite = CreateDIBSection(screenDC, &bmi, DIB_RGB_COLORS, &pBits, NULL, 0);
-
-        if (enemy.idleSprite) {
-            HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, enemy.idleSprite);
-
-            // Заливаем прозрачным цветом
-            HBRUSH bgBrush = CreateSolidBrush(TRANSPARENT_COLOR);
-            RECT rect = { 0, 0, (int)enemy.width, (int)enemy.height };
-            FillRect(memDC, &rect, bgBrush);
-            DeleteObject(bgBrush);
-
-            // Рисуем красного врага
-            HBRUSH enemyBrush = CreateSolidBrush(RGB(255, 50, 50));
-            HPEN enemyPen = CreatePen(PS_SOLID, 3, RGB(200, 0, 0));
-
-            HPEN oldPen = (HPEN)SelectObject(memDC, enemyPen);
-            HBRUSH oldBrush = (HBRUSH)SelectObject(memDC, enemyBrush);
-
-            // Тело врага
-            Ellipse(memDC, 30, 80, 150, 250);
-
-            // Голова
-            HBRUSH headBrush = CreateSolidBrush(RGB(200, 150, 150));
-            SelectObject(memDC, headBrush);
-            Ellipse(memDC, 60, 30, 120, 90);
-
-            // Глаза (злые)
-            HBRUSH eyeBrush = CreateSolidBrush(RGB(255, 255, 0));
-            SelectObject(memDC, eyeBrush);
-            Ellipse(memDC, 75, 50, 85, 60);  // Левый глаз
-            Ellipse(memDC, 95, 50, 105, 60); // Правый глаз
-
-            // Рот (злой)
-            HPEN mouthPen = CreatePen(PS_SOLID, 3, RGB(150, 0, 0));
-            SelectObject(memDC, mouthPen);
-            Arc(memDC, 70, 70, 110, 85, 70, 77, 110, 77);  // Злая ухмылка
-
-            // Восстанавливаем и чистим
-            SelectObject(memDC, oldPen);
-            SelectObject(memDC, oldBrush);
-            SelectObject(memDC, oldBmp);
-
-            DeleteObject(enemyBrush);
-            DeleteObject(headBrush);
-            DeleteObject(eyeBrush);
-            DeleteObject(enemyPen);
-            DeleteObject(mouthPen);
-
-            enemy.loaded = true;
-            OutputDebugStringA("Временный спрайт врага создан\n");
-        }
-
-        DeleteDC(memDC);
-        ReleaseDC(NULL, screenDC);
-    }
-}
-
-void RenderEnemy(HDC hdc)
-{
-    Enemy& enemy = g_gameState.enemy;
-
-    // Враг виден только при удержании Q
-    if (!enemy.isVisible || !enemy.loaded || !enemy.idleSprite)
-        return;
-
-    int screenX = (int)enemy.x - (int)g_gameState.cameraX - (int)enemy.width / 2;
-    int screenY = (int)enemy.y - (int)g_gameState.cameraY - (int)enemy.height / 2;
-
-    HDC memDC = CreateCompatibleDC(hdc);
-    HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, enemy.idleSprite);
-
-    BITMAP bm;
-    GetObject(enemy.idleSprite, sizeof(bm), &bm);
-
-    // Рисуем с прозрачностью
-    TransparentBlt(hdc, screenX, screenY,
-        (int)enemy.width, (int)enemy.height,
-        memDC, 0, 0, bm.bmWidth, bm.bmHeight, TRANSPARENT_COLOR);
-
-    SelectObject(memDC, oldBmp);
-    DeleteDC(memDC);
-}
-
-// ==================== БОЕВАЯ СИСТЕМА ====================
-
-bool CheckCollision(float x1, float y1, float w1, float h1,
-    float x2, float y2, float w2, float h2)
-{
-    return (x1 < x2 + w2 &&
-        x1 + w1 > x2 &&
-        y1 < y2 + h2 &&
-        y1 + h1 > y2);
-}
-
-void LoadBattleResources() {
-    OutputDebugStringA("=== ЗАГРУЗКА РЕСУРСОВ БОЯ ===\n");
-
-    BattleScene& battle = g_gameState.battle;
-
-    // Загружаем фон боя
-    battle.background = LoadBmpFromDebug("battle_background.bmp");
-    if (!battle.background) {
-        OutputDebugStringA("Не найден фон боя. Создаем временный...\n");
-
-        // Создаем простой темный фон
-        HDC screenDC = GetDC(NULL);
-        HDC memDC = CreateCompatibleDC(screenDC);
-
-        battle.background = CreateCompatibleBitmap(screenDC, g_window.width, g_window.height);
-        HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, battle.background);
-
-        // Градиент от темно-красного к черному
-        for (int y = 0; y < g_window.height; y++) {
-            float t = (float)y / g_window.height;
-            int r = (int)(80 * (1.0f - t));
-            int g = (int)(20 * (1.0f - t));
-            int b = (int)(20 * (1.0f - t));
-
-            HPEN pen = CreatePen(PS_SOLID, 1, RGB(r, g, b));
-            HPEN oldPen = (HPEN)SelectObject(memDC, pen);
-
-            MoveToEx(memDC, 0, y, NULL);
-            LineTo(memDC, g_window.width, y);
-
-            SelectObject(memDC, oldPen);
-            DeleteObject(pen);
-        }
-
-        // Рисуем арену (круг)
-        HBRUSH arenaBrush = CreateSolidBrush(RGB(50, 30, 30));
-        HPEN arenaPen = CreatePen(PS_SOLID, 3, RGB(100, 50, 50));
-
-        HPEN oldPen = (HPEN)SelectObject(memDC, arenaPen);
-        HBRUSH oldBrush = (HBRUSH)SelectObject(memDC, arenaBrush);
-
-        int arenaSize = 600;
-        int arenaX = g_window.width / 2 - arenaSize / 2;
-        int arenaY = g_window.height / 2 - arenaSize / 2;
-        Ellipse(memDC, arenaX, arenaY, arenaX + arenaSize, arenaY + arenaSize);
-
-        // Восстанавливаем
-        SelectObject(memDC, oldPen);
-        SelectObject(memDC, oldBrush);
-        SelectObject(memDC, oldBmp);
-
-        DeleteObject(arenaBrush);
-        DeleteObject(arenaPen);
-        DeleteDC(memDC);
-        ReleaseDC(NULL, screenDC);
-    }
-
-    // Загружаем спрайты для боя
-    battle.player.battleSprite = LoadBmpFromDebug("player_battle.bmp");
-    if (!battle.player.battleSprite) {
-        // Используем обычный спрайт игрока
-        battle.player.battleSprite = g_gameState.player.GetCurrentSprite();
-        if (!battle.player.battleSprite && g_gameState.player.idleAnimation.frames.size() > 0) {
-            battle.player.battleSprite = g_gameState.player.idleAnimation.frames[0];
-        }
-    }
-
-    battle.enemy.battleSprite = LoadBmpFromDebug("enemy_battle.bmp");
-    if (!battle.enemy.battleSprite) {
-        battle.enemy.battleSprite = g_gameState.enemy.idleSprite;
-    }
-
-    // Настраиваем участников боя
-    battle.player.name = L"АЛЕКС ХЭМПТОН";
-    battle.player.maxHealth = 120;
-    battle.player.currentHealth = 120;
-    battle.player.attack = 25;
-    battle.player.defense = 15;
-    battle.player.speed = 20;
-    battle.player.portrait = g_gameState.playerPortrait;
-    battle.player.x = battle.playerBattleX;
-    battle.player.y = battle.playerBattleY;
-
-    battle.enemy.name = L"ТЕНЕВОЙ СТРАЖ";
-    battle.enemy.maxHealth = 100;
-    battle.enemy.currentHealth = 100;
-    battle.enemy.attack = 20;
-    battle.enemy.defense = 12;
-    battle.enemy.speed = 18;
-    battle.enemy.portrait = g_gameState.npcPortrait;
-    battle.enemy.x = battle.enemyBattleX;
-    battle.enemy.y = battle.enemyBattleY;
-
-    OutputDebugStringA("Ресурсы боя загружены\n");
-}
-
-void StartBattle() {
-    if (g_gameState.inBattle) return;
-
-    OutputDebugStringA("=== НАЧАЛО БОЯ ===\n");
-
-    g_gameState.inBattle = true;
-    g_gameState.battle.isActive = true;
-    g_gameState.battle.Reset();
-
-    // Останавливаем музыку уровня
-    StopBackgroundMusic();
-
-    // Включаем музыку боя
-    PlayBackgroundMusic("x64\\Debug\\battle_music.wav");
-
-    // Показываем сообщение о начале боя
-    g_gameState.battle.ShowMessage(L"⚔  НАЧАЛО БОЯ!");
-
-    InvalidateRect(g_window.hWnd, nullptr, TRUE);
-}
-
-void EndBattle(bool victory) {
-    g_gameState.inBattle = false;
-    g_gameState.battle.isActive = false;
-
-    // Останавливаем музыку боя
-    StopBackgroundMusic();
-
-    // Возвращаем музыку уровня
-    PlayBackgroundMusic("x64\\Debug\\bazar.wav");
-
-    // Если победа - враг исчезает
-    if (victory) {
-        g_gameState.enemy.x = -1000;
-        g_gameState.enemy.y = -1000;
-
-        // Показываем диалог победы
-        StartDialog(L"АЛЕКС ХЭМПТОН",
-            L"Еще один призрак лондонских улиц отправлен в небытие. Но что-то подсказывает мне, что это только начало...");
-    }
-
-    InvalidateRect(g_window.hWnd, nullptr, TRUE);
-}
-
-void ProcessPlayerTurn(int action) {
-    BattleScene& battle = g_gameState.battle;
-
-    switch (action) {
-    case ACTION_ATTACK: {
-        // Игрок атакует
-        int damage = battle.player.attack + (rand() % 11) - 5;
-        damage = max(5, damage - battle.enemy.defense / 2);
-
-        battle.enemy.TakeDamage(damage);
-        battle.ShowDamage(battle.enemy.x, battle.enemy.y - 100, damage, L"⚔");
-        battle.ShowMessage(L"АЛЕКС атакует!");
-
-        if (battle.enemy.currentHealth <= 0) {
-            battle.state = BATTLE_VICTORY;
-            battle.ShowMessage(L"ПОБЕДА!");
-            return;
-        }
-
-        battle.state = BATTLE_ENEMY_TURN;
-        battle.enemyTurnStartTime = GetTickCount();
-        break;
-    }
-
-    case ACTION_DEFEND: {
-        // Игрок защищается
-        battle.player.isDefending = true;
-        battle.ShowMessage(L"АЛЕКС готовится к защите!");
-
-        battle.state = BATTLE_ENEMY_TURN;
-        battle.enemyTurnStartTime = GetTickCount();
-        break;
-    }
-
-    case ACTION_ITEM: {
-        // Использование предмета (здоровье)
-        int healAmount = 30;
-        battle.player.Heal(healAmount);
-        battle.ShowDamage(battle.player.x, battle.player.y - 100, healAmount, L"❤");
-        battle.ShowMessage(L"АЛЕКС использует аптечку!");
-
-        battle.state = BATTLE_ENEMY_TURN;
-        battle.enemyTurnStartTime = GetTickCount();
-        break;
-    }
-
-    case ACTION_ESCAPE: {
-        // Побег из боя
-        int escapeChance = 50 + battle.player.speed - battle.enemy.speed;
-        if ((rand() % 100) < escapeChance) {
-            battle.state = BATTLE_ESCAPED;
-            battle.ShowMessage(L"УСПЕШНЫЙ ПОБЕГ!");
-        }
-        else {
-            battle.ShowMessage(L"ПОБЕГ НЕ УДАЛСЯ!");
-            battle.state = BATTLE_ENEMY_TURN;
-            battle.enemyTurnStartTime = GetTickCount();
-        }
-        break;
-    }
-    }
-}
-
-void ProcessEnemyTurn() {
-    BattleScene& battle = g_gameState.battle;
-
-    // Простой ИИ врага
-    int action;
-    if (battle.enemy.currentHealth < 30 && (rand() % 100) < 40) {
-        action = ACTION_DEFEND;
-    }
-    else if (battle.player.currentHealth < 50 && (rand() % 100) < 60) {
-        action = ACTION_ATTACK;
-    }
-    else {
-        action = rand() % 4;
-    }
-
-    switch (action) {
-    case ACTION_ATTACK: {
-        int damage = battle.enemy.attack + (rand() % 11) - 5;
-        damage = max(5, damage - battle.player.defense / 2);
-
-        battle.player.TakeDamage(damage);
-        battle.ShowDamage(battle.player.x, battle.player.y - 100, damage, L"⚔");
-        battle.ShowMessage(L"ТЕНЕВОЙ СТРАЖ атакует!");
-
-        if (battle.player.currentHealth <= 0) {
-            battle.state = BATTLE_DEFEAT;
-            battle.ShowMessage(L"ПОРАЖЕНИЕ...");
-            return;
-        }
-        break;
-    }
-
-    case ACTION_DEFEND: {
-        battle.enemy.isDefending = true;
-        battle.ShowMessage(L"ТЕНЕВОЙ СТРАЖ защищается!");
-        break;
-    }
-
-    default: {
-        int damage = battle.enemy.attack + (rand() % 11) - 5;
-        damage = max(5, damage - battle.player.defense / 2);
-
-        battle.player.TakeDamage(damage);
-        battle.ShowDamage(battle.player.x, battle.player.y - 100, damage, L"⚔");
-        battle.ShowMessage(L"ТЕНЕВОЙ СТРАЖ атакует!");
-
-        if (battle.player.currentHealth <= 0) {
-            battle.state = BATTLE_DEFEAT;
-            battle.ShowMessage(L"ПОРАЖЕНИЕ...");
-            return;
-        }
-        break;
-    }
-    }
-
-    battle.state = BATTLE_PLAYER_TURN;
-}
-
-void UpdateBattle() {
-    BattleScene& battle = g_gameState.battle;
-
-    // Проверяем состояние боя
-    switch (battle.state) {
-    case BATTLE_VICTORY:
-        if (battle.showMessage && (GetTickCount() - battle.messageStartTime) > 2000) {
-            EndBattle(true);
-        }
-        break;
-
-    case BATTLE_DEFEAT:
-        if (battle.showMessage && (GetTickCount() - battle.messageStartTime) > 2000) {
-            EndBattle(false);
-        }
-        break;
-
-    case BATTLE_ESCAPED:
-        if (battle.showMessage && (GetTickCount() - battle.messageStartTime) > 1500) {
-            EndBattle(false);
-        }
-        break;
-
-    case BATTLE_ENEMY_TURN:
-        if (battle.enemyTurnStartTime == 0) {
-            battle.enemyTurnStartTime = GetTickCount();
-        }
-        else if (GetTickCount() - battle.enemyTurnStartTime > 1000) {
-            ProcessEnemyTurn();
-            battle.enemyTurnStartTime = 0;
-        }
-        break;
-    }
-
-    // Скрываем сообщение через 1.5 секунды
-    if (battle.showMessage && (GetTickCount() - battle.messageStartTime) > 1500) {
-        battle.showMessage = false;
-    }
-
-    // Скрываем текст урона через 1 секунду
-    if (battle.showDamageText && (GetTickCount() - battle.damageTextStartTime) > 1000) {
-        battle.showDamageText = false;
-    }
-}
-
-void RenderBattle(HDC hdc) {
-    BattleScene& battle = g_gameState.battle;
-
-    if (!battle.isActive) return;
-
-    // Отрисовываем фон боя
-    if (battle.background) {
-        HDC memDC = CreateCompatibleDC(hdc);
-        HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, battle.background);
-
-        BITMAP bm;
-        GetObject(battle.background, sizeof(bm), &bm);
-
-        StretchBlt(hdc, 0, 0, g_window.width, g_window.height,
-            memDC, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
-
-        SelectObject(memDC, oldBmp);
-        DeleteDC(memDC);
-    }
-    else {
-        HBRUSH bgBrush = CreateSolidBrush(RGB(20, 10, 10));
-        RECT rect = { 0, 0, g_window.width, g_window.height };
-        FillRect(hdc, &rect, bgBrush);
-        DeleteObject(bgBrush);
-    }
-
-    // === Отрисовка участников боя ===
-    // Игрок (слева)
-    if (battle.player.battleSprite) {
-        HDC memDC = CreateCompatibleDC(hdc);
-        HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, battle.player.battleSprite);
-
-        BITMAP bm;
-        GetObject(battle.player.battleSprite, sizeof(bm), &bm);
-
-        TransparentBlt(hdc,
-            (int)battle.player.x - (int)battle.player.width / 2,
-            (int)battle.player.y - (int)battle.player.height / 2,
-            (int)battle.player.width, (int)battle.player.height,
-            memDC, 0, 0, bm.bmWidth, bm.bmHeight, TRANSPARENT_COLOR);
-
-        SelectObject(memDC, oldBmp);
-        DeleteDC(memDC);
-    }
-
-    // Враг (справа)
-    if (battle.enemy.battleSprite) {
-        HDC memDC = CreateCompatibleDC(hdc);
-        HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, battle.enemy.battleSprite);
-
-        BITMAP bm;
-        GetObject(battle.enemy.battleSprite, sizeof(bm), &bm);
-
-        TransparentBlt(hdc,
-            (int)battle.enemy.x - (int)battle.enemy.width / 2,
-            (int)battle.enemy.y - (int)battle.enemy.height / 2,
-            (int)battle.enemy.width, (int)battle.enemy.height,
-            memDC, 0, 0, bm.bmWidth, bm.bmHeight, TRANSPARENT_COLOR);
-
-        SelectObject(memDC, oldBmp);
-        DeleteDC(memDC);
-    }
-
-    // === Полоски здоровья ===
-    // Полоска здоровья игрока
-    int playerHealthX = 100;
-    int playerHealthY = 100;
-
-    HBRUSH bgHealth = CreateSolidBrush(RGB(50, 20, 20));
-    RECT playerHealthBg = {
-        playerHealthX, playerHealthY,
-        playerHealthX + (int)battle.player.healthBarWidth,
-        playerHealthY + (int)battle.player.healthBarHeight
-    };
-    FillRect(hdc, &playerHealthBg, bgHealth);
-
-    float healthPercent = battle.player.GetHealthPercentage();
-    int healthWidth = (int)(battle.player.healthBarWidth * healthPercent);
-
-    COLORREF healthColor;
-    if (healthPercent > 0.5) {
-        healthColor = RGB(0, 200, 0);
-    }
-    else if (healthPercent > 0.25) {
-        healthColor = RGB(200, 200, 0);
-    }
-    else {
-        healthColor = RGB(200, 0, 0);
-    }
-
-    HBRUSH healthBrush = CreateSolidBrush(healthColor);
-    RECT playerHealthRect = {
-        playerHealthX, playerHealthY,
-        playerHealthX + healthWidth,
-        playerHealthY + (int)battle.player.healthBarHeight
-    };
-    FillRect(hdc, &playerHealthRect, healthBrush);
-
-    HPEN healthPen = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
-    HPEN oldPen = (HPEN)SelectObject(hdc, healthPen);
-    HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
-
-    Rectangle(hdc, playerHealthX - 1, playerHealthY - 1,
-        playerHealthX + (int)battle.player.healthBarWidth + 1,
-        playerHealthY + (int)battle.player.healthBarHeight + 1);
-
-    // Имя и цифры здоровья игрока
-    SetBkMode(hdc, TRANSPARENT);
-    HFONT font = CreateFont(20, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        DEFAULT_QUALITY, DEFAULT_PITCH, L"Arial");
-    HFONT oldFont = (HFONT)SelectObject(hdc, font);
-
-    std::wstring playerHealthText = battle.player.name + L"  " +
-        std::to_wstring(battle.player.currentHealth) +
-        L"/" + std::to_wstring(battle.player.maxHealth);
-
-    SetTextColor(hdc, RGB(255, 255, 255));
-    TextOut(hdc, playerHealthX, playerHealthY - 25,
-        playerHealthText.c_str(), (int)playerHealthText.length());
-
-    // Полоска здоровья врага (справа)
-    int enemyHealthX = g_window.width - 100 - (int)battle.enemy.healthBarWidth;
-    int enemyHealthY = 100;
-
-    RECT enemyHealthBg = {
-        enemyHealthX, enemyHealthY,
-        enemyHealthX + (int)battle.enemy.healthBarWidth,
-        enemyHealthY + (int)battle.enemy.healthBarHeight
-    };
-    FillRect(hdc, &enemyHealthBg, bgHealth);
-
-    healthPercent = battle.enemy.GetHealthPercentage();
-    healthWidth = (int)(battle.enemy.healthBarWidth * healthPercent);
-
-    if (healthPercent > 0.5) {
-        healthColor = RGB(200, 0, 0);
-    }
-    else if (healthPercent > 0.25) {
-        healthColor = RGB(200, 100, 0);
-    }
-    else {
-        healthColor = RGB(150, 50, 50);
-    }
-
-    DeleteObject(healthBrush);
-    healthBrush = CreateSolidBrush(healthColor);
-
-    RECT enemyHealthRect = {
-        enemyHealthX, enemyHealthY,
-        enemyHealthX + healthWidth,
-        enemyHealthY + (int)battle.enemy.healthBarHeight
-    };
-    FillRect(hdc, &enemyHealthRect, healthBrush);
-
-    Rectangle(hdc, enemyHealthX - 1, enemyHealthY - 1,
-        enemyHealthX + (int)battle.enemy.healthBarWidth + 1,
-        enemyHealthY + (int)battle.enemy.healthBarHeight + 1);
-
-    std::wstring enemyHealthText = battle.enemy.name + L"  " +
-        std::to_wstring(battle.enemy.currentHealth) +
-        L"/" + std::to_wstring(battle.enemy.maxHealth);
-
-    TextOut(hdc, enemyHealthX, enemyHealthY - 25,
-        enemyHealthText.c_str(), (int)enemyHealthText.length());
-
-    // === Интерфейс действий (только во время хода игрока) ===
-    if (battle.state == BATTLE_PLAYER_TURN) {
-        int actionsX = g_window.width / 2 - 200;
-        int actionsY = g_window.height - 200;
-
-        // Фон меню действий
-        HBRUSH menuBg = CreateSolidBrush(RGB(40, 30, 40));
-        RECT menuRect = { actionsX - 20, actionsY - 20,
-                        actionsX + 400, actionsY + 160 };
-        DrawRoundedRect(hdc, menuRect.left, menuRect.top,
-            menuRect.right - menuRect.left,
-            menuRect.bottom - menuRect.top,
-            RGB(40, 30, 40), RGB(100, 80, 100), 10);
-
-        // Заголовок
-        HFONT titleFont = CreateFont(24, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            DEFAULT_QUALITY, DEFAULT_PITCH, L"Arial");
-        SelectObject(hdc, titleFont);
-
-        SetTextColor(hdc, RGB(220, 180, 100));
-        std::wstring turnText = L"ВАШ ХОД";
-        RECT turnRect = { actionsX, actionsY - 50, actionsX + 400, actionsY - 10 };
-        DrawText(hdc, turnText.c_str(), -1, &turnRect, DT_CENTER | DT_VCENTER);
-
-        // Действия
-        HFONT actionFont = CreateFont(22, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            DEFAULT_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-        SelectObject(hdc, actionFont);
-
-        for (int i = 0; i < battle.actions.size(); i++) {
-            int actionY = actionsY + i * 40;
-
-            if (i == battle.selectedAction) {
-                HBRUSH selectedBrush = CreateSolidBrush(RGB(80, 60, 80));
-                RECT selectedRect = { actionsX - 10, actionY - 5,
-                                    actionsX + 380, actionY + 35 };
-                FillRect(hdc, &selectedRect, selectedBrush);
-                DeleteObject(selectedBrush);
-
-                HPEN selectedPen = CreatePen(PS_SOLID, 2, RGB(220, 180, 100));
-                HPEN oldActionPen = (HPEN)SelectObject(hdc, selectedPen);
-                HBRUSH oldActionBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
-
-                Rectangle(hdc, selectedRect.left, selectedRect.top,
-                    selectedRect.right, selectedRect.bottom);
-
-                SelectObject(hdc, oldActionPen);
-                SelectObject(hdc, oldActionBrush);
-                DeleteObject(selectedPen);
-
-                SetTextColor(hdc, RGB(255, 255, 200));
+bool Texture2D::CreateDebugTexture(ID3D11Device* device, const wchar_t* name) {
+    this->filename = L"[DEBUG]" + std::wstring(name);
+    width = 256;
+    height = 256;
+
+    DEBUG_LOG_W(L"Создание дебажной текстуры: " + std::wstring(name));
+
+    // Создаем пиксели для дебажной текстуры (шахматный паттерн)
+    std::vector<BYTE> pixels(width * height * 4);
+
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int idx = (y * width + x) * 4;
+            bool isChecker = ((x / 32) + (y / 32)) % 2 == 0;
+
+            if (isChecker) {
+                pixels[idx] = 255;     // Blue
+                pixels[idx + 1] = 200; // Green
+                pixels[idx + 2] = 150; // Red
             }
             else {
-                SetTextColor(hdc, RGB(200, 200, 200));
+                pixels[idx] = 100;     // Blue
+                pixels[idx + 1] = 150; // Green
+                pixels[idx + 2] = 200; // Red
             }
-
-            RECT actionRect = { actionsX, actionY, actionsX + 400, actionY + 40 };
-            DrawText(hdc, battle.actions[i].c_str(), -1, &actionRect,
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            pixels[idx + 3] = 255; // Alpha
         }
-
-        // Подсказка управления
-        SetTextColor(hdc, RGB(150, 150, 150));
-        std::wstring controls = L"↑↓ - Выбор | SPACE - Подтвердить";
-        RECT controlsRect = { actionsX, actionsY + 170, actionsX + 400, actionsY + 200 };
-        DrawText(hdc, controls.c_str(), -1, &controlsRect, DT_CENTER | DT_VCENTER);
-
-        DeleteObject(titleFont);
-        DeleteObject(actionFont);
     }
 
-    // === Сообщение в центре экрана ===
-    if (battle.showMessage) {
-        HFONT messageFont = CreateFont(36, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            DEFAULT_QUALITY, DEFAULT_PITCH, L"Arial");
-        SelectObject(hdc, messageFont);
+    // Создаем текстуру DirectX
+    D3D11_TEXTURE2D_DESC texDesc = {};
+    texDesc.Width = width;
+    texDesc.Height = height;
+    texDesc.MipLevels = 1;
+    texDesc.ArraySize = 1;
+    texDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.SampleDesc.Quality = 0;
+    texDesc.Usage = D3D11_USAGE_DEFAULT;
+    texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    texDesc.CPUAccessFlags = 0;
 
-        SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, RGB(255, 255, 200));
+    D3D11_SUBRESOURCE_DATA initData = {};
+    initData.pSysMem = pixels.data();
+    initData.SysMemPitch = width * 4;
+    initData.SysMemSlicePitch = 0;
 
-        BLENDFUNCTION blend = { 0 };
-        blend.BlendOp = AC_SRC_OVER;
-        blend.SourceConstantAlpha = 200;
-        blend.AlphaFormat = 0;
-
-        SIZE textSize;
-        GetTextExtentPoint32(hdc, battle.centerMessage.c_str(),
-            (int)battle.centerMessage.length(), &textSize);
-
-        int msgX = g_window.width / 2 - textSize.cx / 2 - 20;
-        int msgY = g_window.height / 2 - 50;
-        int msgWidth = textSize.cx + 40;
-        int msgHeight = 80;
-
-        HDC memDC = CreateCompatibleDC(hdc);
-        HBITMAP msgBmp = CreateCompatibleBitmap(hdc, msgWidth, msgHeight);
-        HBITMAP oldMsgBmp = (HBITMAP)SelectObject(memDC, msgBmp);
-
-        HBRUSH msgBg = CreateSolidBrush(RGB(0, 0, 0));
-        RECT msgRect = { 0, 0, msgWidth, msgHeight };
-        FillRect(memDC, &msgRect, msgBg);
-        DeleteObject(msgBg);
-
-        SetTextColor(memDC, RGB(255, 255, 200));
-        SetBkMode(memDC, TRANSPARENT);
-
-        RECT textRect = { 0, 0, msgWidth, msgHeight };
-        DrawText(memDC, battle.centerMessage.c_str(), -1, &textRect,
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-        AlphaBlend(hdc, msgX, msgY, msgWidth, msgHeight,
-            memDC, 0, 0, msgWidth, msgHeight, blend);
-
-        SelectObject(memDC, oldMsgBmp);
-        DeleteObject(msgBmp);
-        DeleteDC(memDC);
-        DeleteObject(messageFont);
+    HRESULT hr = device->CreateTexture2D(&texDesc, &initData, &texture);
+    if (FAILED(hr)) {
+        DEBUG_ERROR("Ошибка создания дебажной текстуры");
+        return false;
     }
 
-    // === Текст урона ===
-    if (battle.showDamageText) {
-        HFONT damageFont = CreateFont(28, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            DEFAULT_QUALITY, DEFAULT_PITCH, L"Arial");
-        SelectObject(hdc, damageFont);
+    // Создаем шейдерный ресурс
+    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Format = texDesc.Format;
+    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MostDetailedMip = 0;
+    srvDesc.Texture2D.MipLevels = 1;
 
-        SetBkMode(hdc, TRANSPARENT);
-
-        if (battle.damageValue > 0 && battle.damageText != L"❤") {
-            SetTextColor(hdc, RGB(255, 50, 50));
-        }
-        else {
-            SetTextColor(hdc, RGB(50, 255, 50));
-        }
-
-        float timePassed = (GetTickCount() - battle.damageTextStartTime) / 1000.0f;
-        int offsetY = (int)(-50 * timePassed);
-
-        RECT damageRect = {
-            (int)battle.damageTextX - 100,
-            (int)battle.damageTextY + offsetY - 50,
-            (int)battle.damageTextX + 100,
-            (int)battle.damageTextY + offsetY + 50
-        };
-
-        DrawText(hdc, battle.damageText.c_str(), -1, &damageRect,
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-        DeleteObject(damageFont);
+    hr = device->CreateShaderResourceView(texture, &srvDesc, &srv);
+    if (FAILED(hr)) {
+        DEBUG_ERROR("Ошибка создания SRV для дебажной текстуры");
+        texture->Release();
+        return false;
     }
 
-    // === Статус защиты ===
-    if (battle.player.isDefending) {
-        SetTextColor(hdc, RGB(100, 150, 255));
-        std::wstring defendText = L"🛡";
-        TextOut(hdc, (int)battle.player.x - 15, (int)battle.player.y - 150,
-            defendText.c_str(), (int)defendText.length());
+    // Создаем сэмплер
+    D3D11_SAMPLER_DESC sampDesc = {};
+    sampDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    sampDesc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
+    sampDesc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
+    sampDesc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+    sampDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+    sampDesc.MinLOD = 0;
+    sampDesc.MaxLOD = D3D11_FLOAT32_MAX;
+
+    hr = device->CreateSamplerState(&sampDesc, &samplerState);
+    if (FAILED(hr)) {
+        DEBUG_ERROR("Ошибка создания сэмплера для дебажной текстуры");
+        srv->Release();
+        texture->Release();
+        return false;
     }
 
-    if (battle.enemy.isDefending) {
-        SetTextColor(hdc, RGB(255, 150, 100));
-        std::wstring defendText = L"🛡";
-        TextOut(hdc, (int)battle.enemy.x - 15, (int)battle.enemy.y - 150,
-            defendText.c_str(), (int)defendText.length());
-    }
-
-    // Восстанавливаем GDI объекты
-    SelectObject(hdc, oldFont);
-    SelectObject(hdc, oldPen);
-    SelectObject(hdc, oldBrush);
-
-    DeleteObject(bgHealth);
-    DeleteObject(healthBrush);
-    DeleteObject(healthPen);
-    DeleteObject(font);
+    DEBUG_SUCCESS("Дебажная текстура создана");
+    return true;
 }
 
-// ==================== ГЛАВНЫЕ ФУНКЦИИ ====================
+bool Texture2D::CreateColorTexture(ID3D11Device* device, const wchar_t* name, float r, float g, float b) {
+    this->filename = L"[COLOR]" + std::wstring(name);
+    width = 1;
+    height = 1;
 
-void ProcessInput()
+    DEBUG_LOG_W(L"Создание цветной текстуры: " + std::wstring(name));
+
+    // Создаем пиксели для цветной текстуры (1x1 пиксель)
+    std::vector<BYTE> pixels(4);
+    pixels[0] = (BYTE)(b * 255);  // Blue
+    pixels[1] = (BYTE)(g * 255);  // Green
+    pixels[2] = (BYTE)(r * 255);  // Red
+    pixels[3] = 255;              // Alpha
+
+    // Создаем текстуру DirectX
+    D3D11_TEXTURE2D_DESC texDesc = {};
+    texDesc.Width = 1;
+    texDesc.Height = 1;
+    texDesc.MipLevels = 1;
+    texDesc.ArraySize = 1;
+    texDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.SampleDesc.Quality = 0;
+    texDesc.Usage = D3D11_USAGE_DEFAULT;
+    texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    texDesc.CPUAccessFlags = 0;
+
+    D3D11_SUBRESOURCE_DATA initData = {};
+    initData.pSysMem = pixels.data();
+    initData.SysMemPitch = 4;
+    initData.SysMemSlicePitch = 0;
+
+    HRESULT hr = device->CreateTexture2D(&texDesc, &initData, &texture);
+    if (FAILED(hr)) {
+        DEBUG_ERROR("Ошибка создания цветной текстуры");
+        return false;
+    }
+
+    // Создаем шейдерный ресурс
+    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Format = texDesc.Format;
+    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MostDetailedMip = 0;
+    srvDesc.Texture2D.MipLevels = 1;
+
+    hr = device->CreateShaderResourceView(texture, &srvDesc, &srv);
+    if (FAILED(hr)) {
+        DEBUG_ERROR("Ошибка создания SRV для цветной текстуры");
+        texture->Release();
+        return false;
+    }
+
+    // Создаем сэмплер
+    D3D11_SAMPLER_DESC sampDesc = {};
+    sampDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    sampDesc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
+    sampDesc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
+    sampDesc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+    sampDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+    sampDesc.MinLOD = 0;
+    sampDesc.MaxLOD = D3D11_FLOAT32_MAX;
+
+    hr = device->CreateSamplerState(&sampDesc, &samplerState);
+    if (FAILED(hr)) {
+        DEBUG_ERROR("Ошибка создания сэмплера для цветной текстуры");
+        srv->Release();
+        texture->Release();
+        return false;
+    }
+
+    DEBUG_SUCCESS("Цветная текстура создана");
+    return true;
+}
+
+void Texture2D::Cleanup() {
+    if (samplerState) samplerState->Release();
+    if (srv) srv->Release();
+    if (texture) texture->Release();
+}
+
+// ==================== 3D МОДЕЛЬ ====================
+class Model3D
 {
-    // Если в бою - обрабатываем только управление боем
-    if (g_gameState.inBattle) {
-        BattleScene& battle = g_gameState.battle;
+private:
+    struct ModelMesh {
+        ID3D11Buffer* vertexBuffer = nullptr;
+        ID3D11Buffer* indexBuffer = nullptr;
+        int textureIndex = -1;
+        int indexCount = 0;
+        int vertexCount = 0;
+        std::string materialName;
+    };
 
-        if (battle.state == BATTLE_PLAYER_TURN) {
-            static bool keyDown = false;
+    std::vector<ModelMesh> meshes;
+    XMFLOAT3 position = { 0, 0, 0 };
+    XMFLOAT3 rotation = { 0, 0, 0 };
+    XMFLOAT3 scale = { 1, 1, 1 };
+    bool isVisible = true;
+    bool hasError = false;
 
-            if (GetAsyncKeyState(VK_UP) & 0x8000) {
-                if (!keyDown) {
-                    battle.selectedAction--;
-                    if (battle.selectedAction < 0)
-                        battle.selectedAction = battle.actions.size() - 1;
-                    keyDown = true;
-                    InvalidateRect(g_window.hWnd, nullptr, FALSE);
-                }
+public:
+    bool LoadFromOBJ(ID3D11Device* device, TextureManager& texManager,
+        const std::wstring& objFile,
+        const std::vector<std::wstring>& textureFiles) {
+        DEBUG_LOG("Начало загрузки 3D модели...");
+
+        // Ищем OBJ файл
+        std::wstring foundObjPath = FileSystemHelper::FindFile(objFile + L".obj");
+        if (foundObjPath.empty()) {
+            // Пробуем без расширения
+            foundObjPath = FileSystemHelper::FindFile(objFile);
+        }
+
+        if (foundObjPath.empty()) {
+            DEBUG_WARNING("OBJ файл не найден, создаю простую модель");
+            DEBUG_WARNING("Искали файл: " + std::string(objFile.begin(), objFile.end()) + ".obj");
+            CreateSimpleHumanModel(device, texManager);
+            hasError = true;
+            return true;
+        }
+
+        DEBUG_LOG_W(L"OBJ найден: " + foundObjPath);
+
+        // Загружаем OBJ с материалами
+        std::vector<Mesh> loadedMeshes;
+        std::map<std::string, Material> materials;
+
+        if (!OBJLoader::Load(foundObjPath, loadedMeshes, materials)) {
+            DEBUG_WARNING("Ошибка загрузки OBJ файла, создаю простую модель");
+            CreateSimpleHumanModel(device, texManager);
+            hasError = true;
+            return true;
+        }
+
+        // Создаем текстуры для материалов
+        std::map<std::string, int> materialTextures;
+        for (const auto& matPair : materials) {
+            const Material& mat = matPair.second;
+
+            // Создаем цветную текстуру на основе диффузного цвета
+            std::wstring matName(mat.name.begin(), mat.name.end());
+            int texIndex = texManager.CreateColorTexture(matName,
+                mat.diffuse.x,
+                mat.diffuse.y,
+                mat.diffuse.z);
+
+            if (texIndex >= 0) {
+                materialTextures[mat.name] = texIndex;
+
+                char buffer[256];
+                sprintf_s(buffer, "Создана текстура для материала %s: цвет (%.3f, %.3f, %.3f), индекс %d",
+                    mat.name.c_str(), mat.diffuse.x, mat.diffuse.y, mat.diffuse.z, texIndex);
+                DEBUG_LOG(buffer);
             }
-            else if (GetAsyncKeyState(VK_DOWN) & 0x8000) {
-                if (!keyDown) {
-                    battle.selectedAction = (battle.selectedAction + 1) % battle.actions.size();
-                    keyDown = true;
-                    InvalidateRect(g_window.hWnd, nullptr, FALSE);
-                }
+        }
+
+        // Если нет материалов, создаем дефолтную текстуру
+        if (materialTextures.empty()) {
+            int defaultTex = texManager.CreateDebugTexture(L"default_material");
+            materialTextures["default"] = defaultTex;
+            DEBUG_LOG("Создана дефолтная текстура");
+        }
+
+        // Создаем DirectX меши
+        for (size_t i = 0; i < loadedMeshes.size(); i++) {
+            ModelMesh dxMesh;
+            dxMesh.materialName = loadedMeshes[i].materialName;
+
+            char buffer[256];
+            sprintf_s(buffer, "Создание меша %zu: %d вершин, %d индексов, материал: %s",
+                i, loadedMeshes[i].vertices.size(), loadedMeshes[i].indices.size(),
+                loadedMeshes[i].materialName.c_str());
+            DEBUG_LOG(buffer);
+
+            // Создаем вершинный буфер
+            D3D11_BUFFER_DESC vbd = {};
+            vbd.Usage = D3D11_USAGE_DEFAULT;
+            vbd.ByteWidth = (UINT)(sizeof(Vertex) * loadedMeshes[i].vertices.size());
+            vbd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+            vbd.CPUAccessFlags = 0;
+
+            D3D11_SUBRESOURCE_DATA vinit = {};
+            vinit.pSysMem = loadedMeshes[i].vertices.data();
+            vinit.SysMemPitch = 0;
+            vinit.SysMemSlicePitch = 0;
+
+            HRESULT hr = device->CreateBuffer(&vbd, &vinit, &dxMesh.vertexBuffer);
+            if (FAILED(hr)) {
+                DEBUG_ERROR("Ошибка создания вершинного буфера");
+                return false;
             }
-            else if (GetAsyncKeyState(VK_SPACE) & 0x8000) {
-                if (!keyDown) {
-                    ProcessPlayerTurn(battle.selectedAction);
-                    keyDown = true;
-                    InvalidateRect(g_window.hWnd, nullptr, FALSE);
-                }
+
+            // Создаем индексный буфер
+            D3D11_BUFFER_DESC ibd = {};
+            ibd.Usage = D3D11_USAGE_DEFAULT;
+            ibd.ByteWidth = (UINT)(sizeof(uint32_t) * loadedMeshes[i].indices.size());
+            ibd.BindFlags = D3D11_BIND_INDEX_BUFFER;
+            ibd.CPUAccessFlags = 0;
+
+            D3D11_SUBRESOURCE_DATA iinit = {};
+            iinit.pSysMem = loadedMeshes[i].indices.data();
+            iinit.SysMemPitch = 0;
+            iinit.SysMemSlicePitch = 0;
+
+            hr = device->CreateBuffer(&ibd, &iinit, &dxMesh.indexBuffer);
+            if (FAILED(hr)) {
+                DEBUG_ERROR("Ошибка создания индексного буфера");
+                dxMesh.vertexBuffer->Release();
+                return false;
+            }
+
+            dxMesh.indexCount = (int)loadedMeshes[i].indices.size();
+            dxMesh.vertexCount = (int)loadedMeshes[i].vertices.size();
+
+            // Назначаем текстуру на основе материала
+            if (!dxMesh.materialName.empty() && materialTextures.find(dxMesh.materialName) != materialTextures.end()) {
+                dxMesh.textureIndex = materialTextures[dxMesh.materialName];
+                sprintf_s(buffer, "Меш %zu: текстура %d для материала '%s'",
+                    i, dxMesh.textureIndex, dxMesh.materialName.c_str());
+                DEBUG_LOG(buffer);
+            }
+            else if (!materialTextures.empty()) {
+                // Берем первую доступную текстуру
+                dxMesh.textureIndex = materialTextures.begin()->second;
+                sprintf_s(buffer, "Меш %zu: дефолтная текстура %d", i, dxMesh.textureIndex);
+                DEBUG_LOG(buffer);
             }
             else {
-                keyDown = false;
+                dxMesh.textureIndex = texManager.CreateDebugTexture(L"fallback");
+                sprintf_s(buffer, "Меш %zu: резервная текстура %d", i, dxMesh.textureIndex);
+                DEBUG_LOG(buffer);
+            }
+
+            meshes.push_back(dxMesh);
+        }
+
+        char buffer[256];
+        sprintf_s(buffer, "Модель загружена: %zu мешей, %zu материалов",
+            meshes.size(), materials.size());
+        DEBUG_SUCCESS(buffer);
+
+        // Выводим информацию о цветах для отладки
+        for (const auto& matPair : materials) {
+            const Material& mat = matPair.second;
+            sprintf_s(buffer, "Материал '%s': цвет (%.3f, %.3f, %.3f)",
+                mat.name.c_str(), mat.diffuse.x, mat.diffuse.y, mat.diffuse.z);
+            DEBUG_LOG(buffer);
+        }
+
+        return true;
+    }
+
+    void CreateSimpleHumanModel(ID3D11Device* device, TextureManager& texManager) {
+        DEBUG_LOG("Создание простой человеческой модели...");
+
+        // Создаем один меш для простой модели
+        ModelMesh humanMesh;
+
+        // Создаем простую человеческую фигуру (торс + голова)
+        std::vector<Vertex> vertices;
+        std::vector<uint32_t> indices;
+
+        // Торс (куб)
+        CreateBox(vertices, indices, 0, 0, 0, 1.0f, 2.0f, 0.5f, XMFLOAT3(0.8f, 0.6f, 0.4f));
+
+        // Голова (куб)
+        CreateBox(vertices, indices, 0, 1.5f, 0, 0.8f, 0.8f, 0.8f, XMFLOAT3(0.9f, 0.8f, 0.7f));
+
+        // Руки (2 куба)
+        CreateBox(vertices, indices, -1.2f, 0.5f, 0, 0.3f, 1.5f, 0.3f, XMFLOAT3(0.7f, 0.5f, 0.3f));
+        CreateBox(vertices, indices, 1.2f, 0.5f, 0, 0.3f, 1.5f, 0.3f, XMFLOAT3(0.7f, 0.5f, 0.3f));
+
+        // Ноги (2 куба)
+        CreateBox(vertices, indices, -0.4f, -1.5f, 0, 0.4f, 1.5f, 0.4f, XMFLOAT3(0.3f, 0.2f, 0.1f));
+        CreateBox(vertices, indices, 0.4f, -1.5f, 0, 0.4f, 1.5f, 0.4f, XMFLOAT3(0.3f, 0.2f, 0.1f));
+
+        // Создаем вершинный буфер
+        D3D11_BUFFER_DESC vbd = {};
+        vbd.Usage = D3D11_USAGE_DEFAULT;
+        vbd.ByteWidth = (UINT)(sizeof(Vertex) * vertices.size());
+        vbd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        vbd.CPUAccessFlags = 0;
+
+        D3D11_SUBRESOURCE_DATA vinit = {};
+        vinit.pSysMem = vertices.data();
+
+        HRESULT hr = device->CreateBuffer(&vbd, &vinit, &humanMesh.vertexBuffer);
+        if (FAILED(hr)) {
+            DEBUG_ERROR("Ошибка создания вершинного буфера для простой модели");
+            return;
+        }
+
+        // Создаем индексный буфер
+        D3D11_BUFFER_DESC ibd = {};
+        ibd.Usage = D3D11_USAGE_DEFAULT;
+        ibd.ByteWidth = (UINT)(sizeof(uint32_t) * indices.size());
+        ibd.BindFlags = D3D11_BIND_INDEX_BUFFER;
+        ibd.CPUAccessFlags = 0;
+
+        D3D11_SUBRESOURCE_DATA iinit = {};
+        iinit.pSysMem = indices.data();
+
+        hr = device->CreateBuffer(&ibd, &iinit, &humanMesh.indexBuffer);
+        if (FAILED(hr)) {
+            DEBUG_ERROR("Ошибка создания индексного буфера для простой модели");
+            humanMesh.vertexBuffer->Release();
+            return;
+        }
+
+        humanMesh.indexCount = (int)indices.size();
+        humanMesh.vertexCount = (int)vertices.size();
+        humanMesh.textureIndex = texManager.CreateDebugTexture(L"human");
+        humanMesh.materialName = "human_material";
+
+        meshes.push_back(humanMesh);
+
+        char buffer[256];
+        sprintf_s(buffer, "Простая модель создана: %d вершин, %d индексов",
+            humanMesh.vertexCount, humanMesh.indexCount);
+        DEBUG_SUCCESS(buffer);
+    }
+
+    void CreateBox(std::vector<Vertex>& vertices, std::vector<uint32_t>& indices,
+        float x, float y, float z,
+        float width, float height, float depth,
+        const XMFLOAT3& color) {
+        float hw = width / 2;
+        float hh = height / 2;
+        float hd = depth / 2;
+
+        int startIndex = (int)vertices.size();
+
+        // Передняя грань
+        vertices.push_back(Vertex(x - hw, y - hh, z - hd, 0, 0, -1, 0, 1, color.x, color.y, color.z));
+        vertices.push_back(Vertex(x + hw, y - hh, z - hd, 0, 0, -1, 1, 1, color.x, color.y, color.z));
+        vertices.push_back(Vertex(x + hw, y + hh, z - hd, 0, 0, -1, 1, 0, color.x, color.y, color.z));
+        vertices.push_back(Vertex(x - hw, y + hh, z - hd, 0, 0, -1, 0, 0, color.x, color.y, color.z));
+
+        // Задняя грань
+        vertices.push_back(Vertex(x - hw, y - hh, z + hd, 0, 0, 1, 1, 1, color.x, color.y, color.z));
+        vertices.push_back(Vertex(x + hw, y - hh, z + hd, 0, 0, 1, 0, 1, color.x, color.y, color.z));
+        vertices.push_back(Vertex(x + hw, y + hh, z + hd, 0, 0, 1, 0, 0, color.x, color.y, color.z));
+        vertices.push_back(Vertex(x - hw, y + hh, z + hd, 0, 0, 1, 1, 0, color.x, color.y, color.z));
+
+        // Левая грань
+        vertices.push_back(Vertex(x - hw, y - hh, z + hd, -1, 0, 0, 0, 1, color.x * 0.8f, color.y * 0.8f, color.z * 0.8f));
+        vertices.push_back(Vertex(x - hw, y - hh, z - hd, -1, 0, 0, 1, 1, color.x * 0.8f, color.y * 0.8f, color.z * 0.8f));
+        vertices.push_back(Vertex(x - hw, y + hh, z - hd, -1, 0, 0, 1, 0, color.x * 0.8f, color.y * 0.8f, color.z * 0.8f));
+        vertices.push_back(Vertex(x - hw, y + hh, z + hd, -1, 0, 0, 0, 0, color.x * 0.8f, color.y * 0.8f, color.z * 0.8f));
+
+        // Правая грань
+        vertices.push_back(Vertex(x + hw, y - hh, z - hd, 1, 0, 0, 0, 1, color.x * 0.8f, color.y * 0.8f, color.z * 0.8f));
+        vertices.push_back(Vertex(x + hw, y - hh, z + hd, 1, 0, 0, 1, 1, color.x * 0.8f, color.y * 0.8f, color.z * 0.8f));
+        vertices.push_back(Vertex(x + hw, y + hh, z + hd, 1, 0, 0, 1, 0, color.x * 0.8f, color.y * 0.8f, color.z * 0.8f));
+        vertices.push_back(Vertex(x + hw, y + hh, z - hd, 1, 0, 0, 0, 0, color.x * 0.8f, color.y * 0.8f, color.z * 0.8f));
+
+        // Верхняя грань
+        vertices.push_back(Vertex(x - hw, y + hh, z - hd, 0, 1, 0, 0, 1, color.x * 0.9f, color.y * 0.9f, color.z * 0.9f));
+        vertices.push_back(Vertex(x + hw, y + hh, z - hd, 0, 1, 0, 1, 1, color.x * 0.9f, color.y * 0.9f, color.z * 0.9f));
+        vertices.push_back(Vertex(x + hw, y + hh, z + hd, 0, 1, 0, 1, 0, color.x * 0.9f, color.y * 0.9f, color.z * 0.9f));
+        vertices.push_back(Vertex(x - hw, y + hh, z + hd, 0, 1, 0, 0, 0, color.x * 0.9f, color.y * 0.9f, color.z * 0.9f));
+
+        // Нижняя грань
+        vertices.push_back(Vertex(x - hw, y - hh, z + hd, 0, -1, 0, 0, 1, color.x * 0.6f, color.y * 0.6f, color.z * 0.6f));
+        vertices.push_back(Vertex(x + hw, y - hh, z + hd, 0, -1, 0, 1, 1, color.x * 0.6f, color.y * 0.6f, color.z * 0.6f));
+        vertices.push_back(Vertex(x + hw, y - hh, z - hd, 0, -1, 0, 1, 0, color.x * 0.6f, color.y * 0.6f, color.z * 0.6f));
+        vertices.push_back(Vertex(x - hw, y - hh, z - hd, 0, -1, 0, 0, 0, color.x * 0.6f, color.y * 0.6f, color.z * 0.6f));
+
+        // Индексы для 6 граней (2 треугольника на грань)
+        for (int face = 0; face < 6; face++) {
+            int base = startIndex + face * 4;
+            indices.push_back(base);
+            indices.push_back(base + 1);
+            indices.push_back(base + 2);
+            indices.push_back(base);
+            indices.push_back(base + 2);
+            indices.push_back(base + 3);
+        }
+    }
+
+    void Render(ID3D11DeviceContext* context, TextureManager& texManager) {
+        if (!isVisible) return;
+
+        // Отладочная информация для первого кадра
+        static bool firstRender = true;
+        if (firstRender) {
+            char buffer[256];
+            sprintf_s(buffer, "Рендеринг модели: %zu мешей", meshes.size());
+            DEBUG_LOG(buffer);
+            firstRender = false;
+        }
+
+        for (size_t i = 0; i < meshes.size(); i++) {
+            const auto& mesh = meshes[i];
+            if (!mesh.vertexBuffer || !mesh.indexBuffer) continue;
+
+            // Устанавливаем вершинный и индексный буферы
+            UINT stride = sizeof(Vertex);
+            UINT offset = 0;
+            context->IASetVertexBuffers(0, 1, &mesh.vertexBuffer, &stride, &offset);
+            context->IASetIndexBuffer(mesh.indexBuffer, DXGI_FORMAT_R32_UINT, 0);
+            context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+            // Устанавливаем текстуру, если есть
+            if (mesh.textureIndex >= 0) {
+                Texture2D* texture = texManager.GetTexture(mesh.textureIndex);
+                if (texture && texture->srv && texture->samplerState) {
+                    context->PSSetShaderResources(0, 1, &texture->srv);
+                    context->PSSetSamplers(0, 1, &texture->samplerState);
+                }
+            }
+
+            // Отрисовываем
+            context->DrawIndexed(mesh.indexCount, 0, 0);
+        }
+    }
+
+    void SetPosition(float x, float y, float z) {
+        position = { x, y, z };
+    }
+
+    void SetRotation(float x, float y, float z) {
+        rotation = { x, y, z };
+    }
+
+    // Добавляем метод для получения текущего поворота
+    XMFLOAT3 GetRotation() const { return rotation; }
+
+    void SetScale(float x, float y, float z) {
+        scale = { x, y, z };
+    }
+
+    XMMATRIX GetWorldMatrix() const {
+        return XMMatrixScaling(scale.x, scale.y, scale.z)
+            * XMMatrixRotationRollPitchYaw(rotation.x, rotation.y, rotation.z)
+            * XMMatrixTranslation(position.x, position.y, position.z);
+    }
+
+    XMFLOAT3 GetPosition() const { return position; }
+
+    void Move(float dx, float dy, float dz) {
+        position.x += dx;
+        position.y += dy;
+        position.z += dz;
+    }
+
+    void Cleanup() {
+        for (auto& mesh : meshes) {
+            if (mesh.indexBuffer) mesh.indexBuffer->Release();
+            if (mesh.vertexBuffer) mesh.vertexBuffer->Release();
+        }
+        meshes.clear();
+    }
+};
+class AnimatedModel3D : public Model3D {
+private:
+    SimpleAnimator animator;
+    bool hasAnimation = false;
+
+public:
+    void SetAnimationEnabled(bool enabled) {
+        if (enabled && !animator.IsWalking()) {
+            animator.StartWalking();
+        }
+        else if (!enabled && animator.IsWalking()) {
+            animator.StopWalking();
+        }
+        hasAnimation = enabled;
+    }
+
+    void UpdateAnimation(float deltaTime) {
+        if (!hasAnimation) return;
+
+        XMFLOAT3 pos = GetPosition();
+        XMFLOAT3 rot = GetRotation();
+        XMFLOAT3 scale = XMFLOAT3(1, 1, 1); // Масштаб не меняем
+
+        animator.Update(deltaTime, pos, rot, scale);
+
+        SetPosition(pos.x, pos.y, pos.z);
+        SetRotation(rot.x, rot.y, rot.z);
+    }
+
+    void InitializeAnimation(const XMFLOAT3& startPos) {
+        animator.SetStartTransform(startPos, XMFLOAT3(0, 0, 0), XMFLOAT3(1, 1, 1));
+        animator.SetWalkCycleTime(0.8f);  // Быстрая ходьба
+        animator.SetAmplitudes(0.15f, 0.08f, 0.05f);
+    }
+
+    bool IsAnimating() const { return animator.IsWalking(); }
+};
+
+// ==================== ШЕЙДЕРЫ ====================
+class ShaderManager {
+private:
+    ID3D11VertexShader* vertexShader = nullptr;
+    ID3D11PixelShader* pixelShader = nullptr;
+    ID3D11InputLayout* inputLayout = nullptr;
+    ID3D11Buffer* constantBuffer = nullptr;
+    ID3D11RasterizerState* rasterizerState = nullptr;
+
+public:
+    bool Initialize(ID3D11Device* device) {
+        DEBUG_LOG("Инициализация шейдеров...");
+
+        // Вершинный шейдер
+        const char* vsCode = R"(
+            cbuffer MatrixBuffer {
+                float4x4 world;
+                float4x4 view;
+                float4x4 proj;
+                float3 lightDir;
+                float padding;
+            };
+            
+            struct VS_IN {
+                float3 pos : POSITION;
+                float3 normal : NORMAL;
+                float2 tex : TEXCOORD;
+                float3 color : COLOR;
+            };
+            
+            struct VS_OUT {
+                float4 pos : SV_POSITION;
+                float2 tex : TEXCOORD0;
+                float3 color : COLOR;
+                float3 normal : NORMAL;
+            };
+            
+            VS_OUT main(VS_IN input) {
+                VS_OUT output;
+                output.pos = mul(float4(input.pos, 1.0), world);
+                output.pos = mul(output.pos, view);
+                output.pos = mul(output.pos, proj);
+                output.tex = input.tex;
+                output.color = input.color;
+                output.normal = mul(input.normal, (float3x3)world);
+                return output;
+            }
+        )";
+
+        // Пиксельный шейдер
+        const char* psCode = R"(
+            Texture2D tex : register(t0);
+            SamplerState sam : register(s0);
+            
+            struct PS_IN {
+                float4 pos : SV_POSITION;
+                float2 tex : TEXCOORD0;
+                float3 color : COLOR;
+                float3 normal : NORMAL;
+            };
+            
+            float4 main(PS_IN input) : SV_TARGET {
+                float4 textureColor = tex.Sample(sam, input.tex);
+                
+                if (textureColor.a < 0.1) discard;
+                
+                float3 lightDir = normalize(float3(1.0, 1.0, 0.5));
+                float diff = max(dot(normalize(input.normal), lightDir), 0.2);
+                float3 diffuse = diff * float3(1.0, 1.0, 1.0);
+                
+                // Смешиваем цвет текстуры с цветом вершины
+                return textureColor * float4(input.color * diffuse, 1.0);
+            }
+        )";
+
+        // Компилируем шейдеры
+        ID3DBlob* vsBlob = nullptr;
+        ID3DBlob* psBlob = nullptr;
+        ID3DBlob* errorBlob = nullptr;
+
+        HRESULT hr = D3DCompile(vsCode, strlen(vsCode), nullptr, nullptr, nullptr,
+            "main", "vs_5_0", D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION, 0, &vsBlob, &errorBlob);
+
+        if (FAILED(hr)) {
+            if (errorBlob) {
+                DEBUG_ERROR((char*)errorBlob->GetBufferPointer());
+                errorBlob->Release();
+            }
+            DEBUG_ERROR("Ошибка компиляции вершинного шейдера");
+            return false;
+        }
+
+        hr = D3DCompile(psCode, strlen(psCode), nullptr, nullptr, nullptr,
+            "main", "ps_5_0", D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION, 0, &psBlob, &errorBlob);
+
+        if (FAILED(hr)) {
+            if (errorBlob) {
+                DEBUG_ERROR((char*)errorBlob->GetBufferPointer());
+                errorBlob->Release();
+            }
+            DEBUG_ERROR("Ошибка компиляции пиксельного шейдера");
+            vsBlob->Release();
+            return false;
+        }
+
+        // Создаем шейдеры
+        hr = device->CreateVertexShader(vsBlob->GetBufferPointer(),
+            vsBlob->GetBufferSize(),
+            nullptr, &vertexShader);
+        if (FAILED(hr)) {
+            DEBUG_ERROR("Ошибка создания вершинного шейдера");
+            vsBlob->Release();
+            psBlob->Release();
+            return false;
+        }
+
+        hr = device->CreatePixelShader(psBlob->GetBufferPointer(),
+            psBlob->GetBufferSize(),
+            nullptr, &pixelShader);
+        if (FAILED(hr)) {
+            DEBUG_ERROR("Ошибка создания пиксельного шейдера");
+            vsBlob->Release();
+            psBlob->Release();
+            return false;
+        }
+
+        // Создаем input layout
+        D3D11_INPUT_ELEMENT_DESC layout[] = {
+            {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
+            {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0},
+            {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0},
+            {"COLOR", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 32, D3D11_INPUT_PER_VERTEX_DATA, 0}
+        };
+
+        hr = device->CreateInputLayout(layout, 4,
+            vsBlob->GetBufferPointer(),
+            vsBlob->GetBufferSize(),
+            &inputLayout);
+
+        vsBlob->Release();
+        psBlob->Release();
+
+        if (FAILED(hr)) {
+            DEBUG_ERROR("Ошибка создания input layout");
+            return false;
+        }
+
+        // Создаем константный буфер
+        D3D11_BUFFER_DESC cbDesc = {};
+        cbDesc.ByteWidth = sizeof(XMMATRIX) * 3 + sizeof(XMFLOAT4);
+        cbDesc.Usage = D3D11_USAGE_DYNAMIC;
+        cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+
+        hr = device->CreateBuffer(&cbDesc, nullptr, &constantBuffer);
+        if (FAILED(hr)) {
+            DEBUG_ERROR("Ошибка создания константного буфера");
+            return false;
+        }
+
+        // Создаем rasterizer state (чтобы видеть обе стороны полигонов)
+        D3D11_RASTERIZER_DESC rsDesc = {};
+        rsDesc.FillMode = D3D11_FILL_SOLID;
+        rsDesc.CullMode = D3D11_CULL_NONE; // Не отбрасывать обратные стороны
+        rsDesc.FrontCounterClockwise = FALSE;
+        rsDesc.DepthClipEnable = TRUE;
+
+        hr = device->CreateRasterizerState(&rsDesc, &rasterizerState);
+        if (FAILED(hr)) {
+            DEBUG_ERROR("Ошибка создания rasterizer state");
+            return false;
+        }
+
+        DEBUG_SUCCESS("Шейдеры инициализированы");
+        return true;
+    }
+
+    void SetShaderParameters(ID3D11DeviceContext* context,
+        const XMMATRIX& world,
+        const XMMATRIX& view,
+        const XMMATRIX& proj) {
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        if (SUCCEEDED(context->Map(constantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+            XMMATRIX* matrices = (XMMATRIX*)mapped.pData;
+            matrices[0] = XMMatrixTranspose(world);
+            matrices[1] = XMMatrixTranspose(view);
+            matrices[2] = XMMatrixTranspose(proj);
+
+            float* lightDir = (float*)(matrices + 3);
+            lightDir[0] = 1.0f;
+            lightDir[1] = 1.0f;
+            lightDir[2] = 0.5f;
+            lightDir[3] = 0.0f;
+
+            context->Unmap(constantBuffer, 0);
+        }
+
+        context->VSSetConstantBuffers(0, 1, &constantBuffer);
+    }
+
+    void Apply(ID3D11DeviceContext* context) {
+        context->VSSetShader(vertexShader, nullptr, 0);
+        context->PSSetShader(pixelShader, nullptr, 0);
+        context->IASetInputLayout(inputLayout);
+        context->RSSetState(rasterizerState);
+    }
+
+    void Cleanup() {
+        if (rasterizerState) rasterizerState->Release();
+        if (constantBuffer) constantBuffer->Release();
+        if (inputLayout) inputLayout->Release();
+        if (pixelShader) pixelShader->Release();
+        if (vertexShader) vertexShader->Release();
+    }
+
+};
+
+// ==================== ИЗОМЕТРИЧЕСКАЯ КАМЕРА ====================
+class IsometricCamera {
+private:
+    XMFLOAT3 target = { 0, 0, 0 };
+    float angle = XM_PIDIV4; // 45 градусов
+    float elevation = XM_PIDIV4; // 45 градусов вверх (истинная изометрия)
+    float distance = 20.0f;
+    float height = 10.0f;
+
+public:
+    XMMATRIX GetViewMatrix() const {
+        XMVECTOR eye = XMVectorSet(
+            target.x + distance * cosf(angle),
+            target.y + height,
+            target.z + distance * sinf(angle),
+            0.0f
+        );
+        XMVECTOR at = XMVectorSet(target.x, target.y, target.z, 0.0f);
+        XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+
+        return XMMatrixLookAtLH(eye, at, up);
+    }
+
+    XMMATRIX GetProjectionMatrix(float aspectRatio) const {
+        // ИЗОМЕТРИЧЕСКАЯ ПРОЕКЦИЯ (ортогональная)
+        float viewWidth = 40.0f;
+        float viewHeight = viewWidth / aspectRatio;
+        return XMMatrixOrthographicLH(viewWidth, viewHeight, 0.1f, 100.0f);
+    }
+
+    void SetTarget(const XMFLOAT3& newTarget) {
+        target = newTarget;
+    }
+
+    void Rotate(float deltaAngle) {
+        angle += deltaAngle;
+    }
+
+    void Zoom(float delta) {
+        distance += delta;
+        distance = std::max<float>(5.0f, std::min<float>(50.0f, distance));
+    }
+};
+// ==================== ИЗОМЕТРИЧЕСКИЙ ФОН (2D КАРТИНКА) ====================
+class IsometricBackground {
+private:
+    ID3D11Buffer* vertexBuffer = nullptr;
+    ID3D11Buffer* indexBuffer = nullptr;
+    Texture2D backgroundTexture;
+    XMFLOAT3 position = { 0, 0, 0 };
+    float size = 40.0f; // Размер соответствует камере
+
+public:
+    bool Initialize(ID3D11Device* device, const wchar_t* textureFilename) {
+        DEBUG_LOG("Инициализация фона с картинкой...");
+
+        if (!textureFilename || wcslen(textureFilename) == 0) {
+            DEBUG_WARNING("Не указано имя файла фона, создаем простой фон");
+            // Создаем дебажную текстуру
+            backgroundTexture.CreateDebugTexture(device, L"background");
+        }
+        else {
+            // Ищем файл с разными расширениями
+            std::wstring filename = textureFilename;
+            std::vector<std::wstring> extensions = { L"", L".jpg", L".jpeg", L".png", L".bmp", L".dds" };
+
+            bool textureLoaded = false;
+
+            for (const auto& ext : extensions) {
+                std::wstring fullFilename = filename + ext;
+                std::wstring foundPath = FileSystemHelper::FindImageFile(fullFilename);
+                if (foundPath.empty()) {
+                    foundPath = FileSystemHelper::FindFile(fullFilename);
+                }
+
+                if (!foundPath.empty()) {
+                    DEBUG_LOG_W(L"Найден файл фона: " + foundPath);
+
+                    if (backgroundTexture.LoadFromFile(device, foundPath.c_str())) {
+                        textureLoaded = true;
+                        DEBUG_SUCCESS("Текстура фона успешно загружена");
+                        break;
+                    }
+                }
+            }
+
+            if (!textureLoaded) {
+                DEBUG_WARNING("Не удалось загрузить текстуру фона, создаем простой фон");
+                backgroundTexture.CreateDebugTexture(device, L"background");
             }
         }
-        return;
+
+        // Создаем геометрию фона (большая плоскость)
+        CreateGeometry(device);
+
+        DEBUG_SUCCESS("Фон инициализирован");
+        return true;
     }
 
-    // Обычное управление
-    Enemy& enemy = g_gameState.enemy;
-    Player& player = g_gameState.player;
-    DWORD currentTime = GetTickCount();
-    bool moved = false;
+    void CreateGeometry(ID3D11Device* device) {
+        DEBUG_LOG("Создание геометрии фона...");
 
-    if (GetAsyncKeyState('W') & 0x8000) {
-        player.y -= player.speed;
-        moved = true;
-    }
-    if (GetAsyncKeyState('S') & 0x8000) {
-        player.y += player.speed;
-        moved = true;
-    }
-    if (GetAsyncKeyState('A') & 0x8000) {
-        player.x -= player.speed;
-        player.facingRight = false;
-        moved = true;
-    }
-    if (GetAsyncKeyState('D') & 0x8000) {
-        player.x += player.speed;
-        player.facingRight = true;
-        moved = true;
-    }
+        std::vector<Vertex> vertices;
+        std::vector<uint32_t> indices;
 
-    // Клавиша Q для показа врага
-    if (GetAsyncKeyState('Q') & 0x8000) {
-        enemy.isVisible = true;
-    }
-    else {
-        enemy.isVisible = false;
-    }
+        float halfSize = size / 2.0f;
+        float height = -1.0f; // Чуть ниже уровня пола для моделей
 
-    player.isMoving = moved;
+        // Создаем одну большую плоскость
+        // Вершины в порядке против часовой стрелки
+        vertices.push_back(Vertex(
+            -halfSize, height, -halfSize,  // Позиция
+            0, 1, 0,                       // Нормаль (вверх)
+            0.0f, 1.0f,                    // UV координаты (нижний левый угол)
+            1, 1, 1                        // Цвет (белый)
+        ));
 
-    if (moved) {
-        player.idleTimer = currentTime;
-        player.isIdle = false;
-    }
+        vertices.push_back(Vertex(
+            halfSize, height, -halfSize,
+            0, 1, 0,
+            1.0f, 1.0f,
+            1, 1, 1
+        ));
 
-    if ((GetAsyncKeyState(VK_SHIFT) & 0x8000) && player.runAnimation.loaded) {
-        if (!player.isRunningBoost) {
-            player.isRunningBoost = true;
-            player.boostStartTime = currentTime;
+        vertices.push_back(Vertex(
+            halfSize, height, halfSize,
+            0, 1, 0,
+            1.0f, 0.0f,
+            1, 1, 1
+        ));
+
+        vertices.push_back(Vertex(
+            -halfSize, height, halfSize,
+            0, 1, 0,
+            0.0f, 0.0f,
+            1, 1, 1
+        ));
+
+        // Индексы для двух треугольников
+        indices = { 0, 1, 2, 0, 2, 3 };
+
+        // Создаем вершинный буфер
+        D3D11_BUFFER_DESC vbd = {};
+        vbd.Usage = D3D11_USAGE_DEFAULT;
+        vbd.ByteWidth = (UINT)(sizeof(Vertex) * vertices.size());
+        vbd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        vbd.CPUAccessFlags = 0;
+
+        D3D11_SUBRESOURCE_DATA vinit = {};
+        vinit.pSysMem = vertices.data();
+
+        HRESULT hr = device->CreateBuffer(&vbd, &vinit, &vertexBuffer);
+        if (FAILED(hr)) {
+            DEBUG_ERROR("Ошибка создания вершинного буфера фона");
+            return;
         }
 
-        player.speed = 12;
-        player.isRunning = true;
-        player.lastRunTime = currentTime;
-        player.idleTimer = currentTime;
-        player.isIdle = false;
-    }
-    else if (player.isRunningBoost) {
-        player.isRunningBoost = false;
-        player.speed = 5;
-        player.isRunning = false;
-    }
+        // Создаем индексный буфер
+        D3D11_BUFFER_DESC ibd = {};
+        ibd.Usage = D3D11_USAGE_DEFAULT;
+        ibd.ByteWidth = (UINT)(sizeof(uint32_t) * indices.size());
+        ibd.BindFlags = D3D11_BIND_INDEX_BUFFER;
+        ibd.CPUAccessFlags = 0;
 
-    if (player.isRunningBoost && (currentTime - player.boostStartTime >= 5000)) {
-        player.isRunningBoost = false;
-        player.speed = 5;
-        player.isRunning = false;
-    }
-}
+        D3D11_SUBRESOURCE_DATA iinit = {};
+        iinit.pSysMem = indices.data();
 
-void UpdatePlayer()
-{
-    LimitPlayerOnGround();
-
-    // Проверка столкновения с врагом
-    if (!g_gameState.inBattle) {
-        Player& player = g_gameState.player;
-        Enemy& enemy = g_gameState.enemy;
-
-        float playerLeft = player.x - player.width / 2 + 50;
-        float playerRight = player.x + player.width / 2 - 50;
-        float playerTop = player.y - player.height / 2 + 100;
-        float playerBottom = player.y + player.height / 2 - 50;
-
-        float enemyLeft = enemy.x - enemy.width / 2 + 50;
-        float enemyRight = enemy.x + enemy.width / 2 - 50;
-        float enemyTop = enemy.y - enemy.height / 2 + 100;
-        float enemyBottom = enemy.y + enemy.height / 2 - 50;
-
-        if (playerLeft < enemyRight &&
-            playerRight > enemyLeft &&
-            playerTop < enemyBottom &&
-            playerBottom > enemyTop) {
-            StartBattle();
-            return; // Прерываем обновление, так как начался бой
+        hr = device->CreateBuffer(&ibd, &iinit, &indexBuffer);
+        if (FAILED(hr)) {
+            DEBUG_ERROR("Ошибка создания индексного буфера фона");
+            vertexBuffer->Release();
+            return;
         }
+
+        DEBUG_LOG("Геометрия фона создана");
     }
 
-    // Обновление анимации
-    if (g_gameState.player.isRunning) {
-        g_gameState.player.runAnimation.frameDelay = 80;
-    }
-    else if (g_gameState.player.isMoving) {
-        g_gameState.player.walkAnimation.frameDelay = 120;
-    }
-    else {
-        g_gameState.player.idleAnimation.frameDelay = 200;
-    }
+    void Render(ID3D11DeviceContext* context) {
+        if (!vertexBuffer || !indexBuffer || !backgroundTexture.srv) {
+            return;
+        }
 
-    g_gameState.player.UpdateAnimation(GetTickCount());
+        // Устанавливаем текстуру
+        context->PSSetShaderResources(0, 1, &backgroundTexture.srv);
+        context->PSSetSamplers(0, 1, &backgroundTexture.samplerState);
 
-    // Обновляем диалог если он активен
-    if (IsDialogActive()) {
-        UpdateDialog();
-    }
-}
+        // Устанавливаем буферы
+        UINT stride = sizeof(Vertex);
+        UINT offset = 0;
+        context->IASetVertexBuffers(0, 1, &vertexBuffer, &stride, &offset);
+        context->IASetIndexBuffer(indexBuffer, DXGI_FORMAT_R32_UINT, 0);
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-void UpdateGameLogic()
-{
-    if (g_gameState.inBattle) {
-        UpdateBattle();
-    }
-    else {
-        UpdatePlayer();
-        UpdateCamera();
-    }
-}
-
-void LimitPlayerOnGround()
-{
-    // Ограничения пока отключены
-}
-
-void UpdateCamera()
-{
-    float targetX = g_gameState.player.x - g_window.width / 2;
-    float targetY = g_gameState.player.y - g_window.height / 2;
-
-    g_gameState.cameraX += (targetX - g_gameState.cameraX) * 0.1f;
-    g_gameState.cameraY += (targetY - g_gameState.cameraY) * 0.1f;
-
-    if (g_gameState.cameraX < 0)
-        g_gameState.cameraX = 0;
-
-    if (g_gameState.cameraX > g_gameState.levelWidth - g_window.width)
-        g_gameState.cameraX = g_gameState.levelWidth - g_window.width;
-
-    if (g_gameState.cameraY < 0)
-        g_gameState.cameraY = 0;
-
-    if (g_gameState.cameraY > g_gameState.levelHeight - g_window.height) {
-        g_gameState.cameraY = g_gameState.levelHeight - g_window.height;
-    }
-}
-
-void RenderGame(HDC hdc)
-{
-    if (!g_window.hBufferDC || g_window.bufferWidth != g_window.width || g_window.bufferHeight != g_window.height)
-    {
-        InitBuffer(hdc);
+        // Рендерим
+        context->DrawIndexed(6, 0, 0);
     }
 
-    HDC bufferDC = g_window.hBufferDC;
-
-    // Если в бою - рисуем бой
-    if (g_gameState.inBattle) {
-        RenderBattle(bufferDC);
-        BitBlt(hdc, 0, 0, g_window.width, g_window.height, bufferDC, 0, 0, SRCCOPY);
-        return;
+    XMMATRIX GetWorldMatrix() const {
+        // Фон всегда плоский и лежит на полу
+        return XMMatrixTranslation(position.x, position.y, position.z);
     }
 
-    // Обычная отрисовка игры
-    HBRUSH background = CreateSolidBrush(RGB(30, 30, 40));
-    RECT fullRect = { 0, 0, g_window.width, g_window.height };
-    FillRect(bufferDC, &fullRect, background);
-    DeleteObject(background);
-
-    if (g_gameState.hLevelBackground)
-    {
-        HDC memDC = CreateCompatibleDC(bufferDC);
-        HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, g_gameState.hLevelBackground);
-
-        BITMAP bm;
-        GetObject(g_gameState.hLevelBackground, sizeof(bm), &bm);
-
-        int srcX = (int)g_gameState.cameraX;
-        int srcY = (int)g_gameState.cameraY;
-        srcX = max(0, min(srcX, (int)g_gameState.levelWidth - g_window.width));
-        srcY = max(0, min(srcY, (int)g_gameState.levelHeight - g_window.height));
-
-        StretchBlt(bufferDC, 0, 0, g_window.width, g_window.height,
-            memDC, srcX, srcY, g_window.width, g_window.height, SRCCOPY);
-
-        SelectObject(memDC, oldBmp);
-        DeleteDC(memDC);
+    void Cleanup() {
+        backgroundTexture.Cleanup();
+        if (indexBuffer) indexBuffer->Release();
+        if (vertexBuffer) vertexBuffer->Release();
     }
-    else
-    {
-        HBRUSH skyBrush = CreateSolidBrush(RGB(135, 206, 235));
-        RECT skyRect = { 0, 0, g_window.width, g_window.height - 150 };
-        FillRect(bufferDC, &skyRect, skyBrush);
-        DeleteObject(skyBrush);
+};
+// ==================== ИГРОВАЯ СЦЕНА ====================
+class GameScene {
+private:
+    Model3D player;
+    IsometricCamera camera;
+    ShaderManager shader;
+    TextureManager textures;
+    ID3D11Device* device = nullptr;
+    ID3D11DeviceContext* context = nullptr;
 
-        HBRUSH floorBrush = CreateSolidBrush(RGB(100, 70, 50));
-        RECT floorRect = { 0, g_window.height - 150, g_window.width, g_window.height };
-        FillRect(bufferDC, &floorRect, floorBrush);
-        DeleteObject(floorBrush);
-    }
+    // Добавляем фон
+    IsometricBackground background;
 
-    // Рисуем врага ПОД игроком
-    RenderEnemy(bufferDC);
-    // Рисуем игрока ПОВЕРХ врага
-    RenderPlayer(bufferDC);
+    float playerSpeed = 10.0f;
+    float rotationSpeed = 3.0f;
+    float currentRotation = XM_PI; // Начинаем смотрит на камеру
 
-    // Рисуем диалог поверх всего
-    if (IsDialogActive()) {
-        RenderDialog(bufferDC);
-    }
+public:
+    bool Initialize(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+        device = dev;
+        context = ctx;
 
-    SetBkMode(bufferDC, TRANSPARENT);
+        DEBUG_LOG("=== ИНИЦИАЛИЗАЦИЯ ИГРОВОЙ СЦЕНЫ ===");
 
-    LOGFONT lf = {};
-    lf.lfHeight = 20;
-    lf.lfWeight = FW_BOLD;
-    wcscpy_s(lf.lfFaceName, L"Arial");
+        // Выводим информацию о текущей директории
+        std::wstring exeDir = FileSystemHelper::GetExecutableDirectory();
+        DEBUG_LOG_W(L"Директория EXE: " + exeDir);
 
-    HFONT font = CreateFontIndirect(&lf);
-    HFONT oldFont = (HFONT)SelectObject(bufferDC, font);
+        // Показываем файлы в директории для отладки
+        DEBUG_LOG("Содержимое директории:");
+        FileSystemHelper::ListFilesInDirectory(exeDir);
 
-    SetTextColor(bufferDC, RGB(255, 255, 255));
+        // Инициализируем шейдеры
+        if (!shader.Initialize(device)) {
+            DEBUG_ERROR("Ошибка инициализации шейдеров");
+            return false;
+        }
 
-    std::wstring posText = L"X: " + std::to_wstring((int)g_gameState.player.x) +
-        L" Y: " + std::to_wstring((int)g_gameState.player.y);
-    RECT posRect = { 20, 20, 300, 50 };
-    DrawText(bufferDC, posText.c_str(), -1, &posRect, DT_LEFT | DT_SINGLELINE);
+        // Инициализируем менеджер текстур
+        textures.Initialize(device);
 
-    std::wstring animText;
-    if (g_gameState.player.isRunning && g_gameState.player.runAnimation.loaded)
-    {
-        animText = L"БЕГ: " + std::to_wstring(g_gameState.player.runAnimation.currentFrame + 1) +
-            L"/" + std::to_wstring(g_gameState.player.runAnimation.frames.size());
-    }
-    else if (g_gameState.player.isMoving && g_gameState.player.walkAnimation.loaded)
-    {
-        animText = L"ХОДЬБА: " + std::to_wstring(g_gameState.player.walkAnimation.currentFrame + 1) +
-            L"/" + std::to_wstring(g_gameState.player.walkAnimation.frames.size());
-    }
-    else if (g_gameState.player.idleAnimation.loaded)
-    {
-        animText = L"IDLE: " + std::to_wstring(g_gameState.player.idleAnimation.currentFrame + 1) +
-            L"/" + std::to_wstring(g_gameState.player.idleAnimation.frames.size());
-    }
-    else
-    {
-        animText = L"Анимация не загружена";
-    }
+        // Инициализируем фон
+        DEBUG_LOG("Загрузка фона...");
+        background.Initialize(device, L"background");
 
-    if (g_gameState.player.isIdle) {
-        animText += L" [IDLE]";
-    }
+        // Загружаем модель character2
+        DEBUG_LOG("Попытка загрузки модели X_Bot.fbx...");
+        std::wstring objFile = L"character2";
 
-    RECT animRect = { 20, 50, 400, 80 };
-    DrawText(bufferDC, animText.c_str(), -1, &animRect, DT_LEFT | DT_SINGLELINE);
-
-    std::wstring controls = L"WASD - Движение | SHIFT - Бег | Q - Показать врага | ESC - Меню | SPACE - Диалог";
-    RECT controlsRect = { g_window.width / 2 - 250, 20, g_window.width / 2 + 250, 50 };
-    DrawText(bufferDC, controls.c_str(), -1, &controlsRect, DT_CENTER | DT_SINGLELINE);
-
-    // Добавляем информацию о враге
-    if (g_gameState.enemy.isVisible) {
-        std::wstring enemyInfo = L"ВРАГ ОБНАРУЖЕН! Позиция: X=" +
-            std::to_wstring((int)g_gameState.enemy.x) +
-            L" Y=" + std::to_wstring((int)g_gameState.enemy.y);
-
-        SetTextColor(bufferDC, RGB(255, 100, 100));
-        RECT enemyRect = { 20, g_window.height - 50, 600, g_window.height - 20 };
-        DrawText(bufferDC, enemyInfo.c_str(), -1, &enemyRect, DT_LEFT | DT_SINGLELINE);
-        SetTextColor(bufferDC, RGB(255, 255, 255));
-    }
-
-    std::wstring speedText = L"Скорость: " + std::to_wstring((int)g_gameState.player.speed);
-    RECT speedRect = { 20, 80, 300, 110 };
-    DrawText(bufferDC, speedText.c_str(), -1, &speedRect, DT_LEFT | DT_SINGLELINE);
-
-    SelectObject(bufferDC, oldFont);
-    DeleteObject(font);
-
-    BitBlt(hdc, 0, 0, g_window.width, g_window.height, bufferDC, 0, 0, SRCCOPY);
-}
-
-void RenderPlayer(HDC hdc)
-{
-    HBITMAP hSprite = g_gameState.player.GetCurrentSprite();
-
-    if (!hSprite)
-    {
-        hSprite = g_gameState.player.isRunning ?
-            g_gameState.player.hSpriteRunRight :
-            g_gameState.player.hSpriteRight;
-    }
-
-    if (!hSprite)
-    {
-        HBRUSH playerBrush = CreateSolidBrush(RGB(0, 150, 255));
-
-        int screenX = (int)g_gameState.player.x - (int)g_gameState.cameraX - (int)g_gameState.player.width / 2;
-        int screenY = (int)g_gameState.player.y - (int)g_gameState.cameraY - (int)g_gameState.player.height / 2;
-
-        RECT playerRect = {
-            screenX,
-            screenY,
-            screenX + (int)g_gameState.player.width,
-            screenY + (int)g_gameState.player.height
+        // Загружаем модель (список текстур пустой, так как используем материалы из MTL)
+        std::vector<std::wstring> textureFiles = {
+            // Пусто - текстуры будут созданы из материалов
         };
 
-        FillRect(hdc, &playerRect, playerBrush);
-
-        RECT headRect = {
-            screenX + (int)g_gameState.player.width / 4,
-            screenY,
-            screenX + (int)g_gameState.player.width * 3 / 4,
-            screenY + (int)g_gameState.player.height / 3
-        };
-        HBRUSH headBrush = CreateSolidBrush(RGB(255, 220, 180));
-        FillRect(hdc, &headRect, headBrush);
-        DeleteObject(headBrush);
-
-        DeleteObject(playerBrush);
-    }
-    else
-    {
-        HDC memDC = CreateCompatibleDC(hdc);
-        HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, hSprite);
-
-        BITMAP bm;
-        GetObject(hSprite, sizeof(bm), &bm);
-
-        int screenX = (int)g_gameState.player.x - (int)g_gameState.cameraX - (int)g_gameState.player.width / 2;
-        int screenY = (int)g_gameState.player.y - (int)g_gameState.cameraY - (int)g_gameState.player.height / 2;
-
-        if (g_gameState.player.facingRight)
-        {
-            TransparentBlt(hdc, screenX, screenY,
-                (int)g_gameState.player.width, (int)g_gameState.player.height,
-                memDC, 0, 0, bm.bmWidth, bm.bmHeight, TRANSPARENT_COLOR);
-        }
-        else
-        {
-            DrawMirroredBitmap(hdc,
-                screenX, screenY,
-                (int)g_gameState.player.width, (int)g_gameState.player.height,
-                memDC, hSprite, bm.bmWidth, bm.bmHeight);
+        if (!player.LoadFromOBJ(device, textures, objFile, textureFiles)) {
+            DEBUG_ERROR("Критическая ошибка загрузки модели");
+            return false;
         }
 
-        SelectObject(memDC, oldBmp);
-        DeleteDC(memDC);
+        // Настраиваем игрока - ОЧЕНЬ МАЛЕНЬКИЙ МАСШТАБ для моделей из Blender!
+        player.SetPosition(0, 0, 0);
+        player.SetScale(0.001f, 0.001f, 0.001f); // 0.1% от исходного размера
+        player.SetRotation(0, currentRotation, 0);
+
+        // Настраиваем камеру
+        camera.SetTarget(player.GetPosition());
+
+        DEBUG_SUCCESS("Игровая сцена инициализирована");
+
+        // Добавим подсказку для пользователя
+        DEBUG_LOG("========================================");
+        DEBUG_LOG("ЕСЛИ МОДЕЛЬ НЕ ВИДНА, ПОПРОБУЙТЕ:");
+        DEBUG_LOG("1. Нажать 1/2/3/4 для изменения масштаба");
+        DEBUG_LOG("  1 - 0.001, 2 - 0.01, 3 - 0.1, 4 - 1.0");
+        DEBUG_LOG("2. Проверить Debug Output в Visual Studio");
+        DEBUG_LOG("3. Убедиться что character2.obj и character2.mtl в папке с EXE");
+        DEBUG_LOG("========================================");
+
+        return true;
     }
+
+    void Update(float deltaTime) {
+        // Управление игроком (изометрическое)
+        bool isMoving = false;
+        XMFLOAT3 moveDir = { 0, 0, 0 };
+        float targetRotation = currentRotation;
+
+        // Определяем направление движения
+        int dirX = 0, dirZ = 0;
+
+        if (GetAsyncKeyState('W') & 0x8000) {
+            moveDir.x += -playerSpeed * deltaTime;
+            moveDir.z += -playerSpeed * deltaTime;
+            dirZ -= 1;
+            isMoving = true;
+        }
+        if (GetAsyncKeyState('S') & 0x8000) {
+            moveDir.x += playerSpeed * deltaTime;
+            moveDir.z += playerSpeed * deltaTime;
+            dirZ += 1;
+            isMoving = true;
+        }
+        if (GetAsyncKeyState('A') & 0x8000) {
+            moveDir.x += playerSpeed * deltaTime;
+            moveDir.z += -playerSpeed * deltaTime;
+            dirX -= 1;
+            isMoving = true;
+        }
+        if (GetAsyncKeyState('D') & 0x8000) {
+            moveDir.x += -playerSpeed * deltaTime;
+            moveDir.z += playerSpeed * deltaTime;
+            dirX += 1;
+            isMoving = true;
+        }
+
+        // Применяем движение
+        if (isMoving) {
+            player.Move(moveDir.x, moveDir.y, moveDir.z);
+
+            // Вычисляем целевой поворот на основе направления движения
+            if (dirX != 0 || dirZ != 0) {
+                // Для изометрических направлений
+                if (dirX == 0 && dirZ == -1) targetRotation = -XM_PIDIV2;      // Север
+                else if (dirX == 1 && dirZ == -1) targetRotation = -XM_PIDIV4;    // Северо-восток
+                else if (dirX == 1 && dirZ == 0) targetRotation = 0.0f;          // Восток
+                else if (dirX == 1 && dirZ == 1) targetRotation = XM_PIDIV4;     // Юго-восток
+                else if (dirX == 0 && dirZ == 1) targetRotation = XM_PIDIV2;     // Юг
+                else if (dirX == -1 && dirZ == 1) targetRotation = XM_PIDIV4 * 3; // Юго-запад
+                else if (dirX == -1 && dirZ == 0) targetRotation = XM_PI;        // Запад
+                else if (dirX == -1 && dirZ == -1) targetRotation = -XM_PIDIV4 * 3; // Северо-запад
+
+                // Плавный поворот
+                float rotationSpeed = 10.0f * deltaTime;
+
+                // Вычисляем разницу углов
+                float angleDiff = targetRotation - currentRotation;
+
+                // Нормализуем разницу в диапазон [-π, π]
+                while (angleDiff > XM_PI) angleDiff -= XM_2PI;
+                while (angleDiff < -XM_PI) angleDiff += XM_2PI;
+
+                // Интерполируем поворот
+                currentRotation += angleDiff * rotationSpeed;
+
+                // Устанавливаем поворот
+                player.SetRotation(0, currentRotation, 0);
+            }
+        }
+
+        // Обновляем цель камеры
+        camera.SetTarget(player.GetPosition());
+
+        // Вращение камеры
+        if (GetAsyncKeyState(VK_LEFT) & 0x8000) {
+            camera.Rotate(-rotationSpeed * deltaTime);
+        }
+        if (GetAsyncKeyState(VK_RIGHT) & 0x8000) {
+            camera.Rotate(rotationSpeed * deltaTime);
+        }
+
+        // Зум камеры
+        if (GetAsyncKeyState(VK_UP) & 0x8000) {
+            camera.Zoom(-playerSpeed * deltaTime);
+        }
+        if (GetAsyncKeyState(VK_DOWN) & 0x8000) {
+            camera.Zoom(playerSpeed * deltaTime);
+        }
+
+        // Сброс позиции
+        if (GetAsyncKeyState('R') & 0x8000) {
+            player.SetPosition(0, 0, 0);
+            currentRotation = XM_PI; // Сбрасываем поворот к камере
+            player.SetRotation(0, currentRotation, 0);
+            DEBUG_LOG("Позиция и поворот сброшены");
+        }
+
+        // Масштаб
+        if (GetAsyncKeyState('1') & 0x8000) {
+            player.SetScale(1.0f, 1.0f, 1.0f);
+            DEBUG_LOG("Масштаб: 0.001");
+        }
+        if (GetAsyncKeyState('2') & 0x8000) {
+            player.SetScale(5.0f, 5.0f, 5.0f);
+            DEBUG_LOG("Масштаб: 0.01");
+        }
+        if (GetAsyncKeyState('3') & 0x8000) {
+            player.SetScale(10.0f, 10.0f, 10.0f);
+            DEBUG_LOG("Масштаб: 0.1");
+        }
+
+        // Отладочная информация
+        static float debugTimer = 0.0f;
+        debugTimer += deltaTime;
+        if (debugTimer > 1.0f) {
+            XMFLOAT3 pos = player.GetPosition();
+            XMFLOAT3 rot = player.GetRotation();
+            char buffer[256];
+            sprintf_s(buffer, "Игрок: Pos(%.2f, %.2f, %.2f) RotY: %.1f° (%.2f рад) Масштаб: проверьте 1/2/3/4",
+                pos.x, pos.y, pos.z, rot.y * 180.0f / XM_PI, rot.y);
+            DEBUG_LOG(buffer);
+            debugTimer = 0.0f;
+        }
+    }
+
+    void Render(float aspectRatio) {
+        // Получаем матрицы камеры
+        XMMATRIX view = camera.GetViewMatrix();
+        XMMATRIX proj = camera.GetProjectionMatrix(aspectRatio);
+
+        // 1. Сначала рендерим фон
+        XMMATRIX backgroundWorld = background.GetWorldMatrix();
+        shader.SetShaderParameters(context, backgroundWorld, view, proj);
+        shader.Apply(context);
+        background.Render(context);
+
+        // 2. Затем рендерим игрока поверх фона
+        XMMATRIX playerWorld = player.GetWorldMatrix();
+        shader.SetShaderParameters(context, playerWorld, view, proj);
+        player.Render(context, textures);
+    }
+
+    void Cleanup() {
+        DEBUG_LOG("Очистка игровой сцены...");
+        background.Cleanup(); // Очищаем фон
+        player.Cleanup();
+        textures.Cleanup();
+        shader.Cleanup();
+        DEBUG_LOG("Игровая сцена очищена");
+    }
+};
+
+// ==================== RENDERER ====================
+class DX11Renderer {
+private:
+    ID3D11Device* device = nullptr;
+    ID3D11DeviceContext* context = nullptr;
+    IDXGISwapChain* swapChain = nullptr;
+    ID3D11RenderTargetView* renderTargetView = nullptr;
+    ID3D11DepthStencilView* depthStencilView = nullptr;
+    D3D11_VIEWPORT viewport = {};
+    HWND hwnd = nullptr;
+
+public:
+    bool Initialize(HWND window, int width, int height) {
+        hwnd = window;
+
+        DEBUG_LOG("Инициализация DirectX 11...");
+
+        // Описание swap chain
+        DXGI_SWAP_CHAIN_DESC scd = {};
+        scd.BufferCount = 1;
+        scd.BufferDesc.Width = width;
+        scd.BufferDesc.Height = height;
+        scd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        scd.BufferDesc.RefreshRate.Numerator = 60;
+        scd.BufferDesc.RefreshRate.Denominator = 1;
+        scd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        scd.OutputWindow = hwnd;
+        scd.SampleDesc.Count = 1;
+        scd.SampleDesc.Quality = 0;
+        scd.Windowed = TRUE;
+        scd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+
+        // Создаем устройство и swap chain
+        D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_11_0;
+        HRESULT hr = D3D11CreateDeviceAndSwapChain(
+            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
+            &featureLevel, 1, D3D11_SDK_VERSION, &scd,
+            &swapChain, &device, nullptr, &context);
+
+        if (FAILED(hr)) {
+            DEBUG_ERROR("Ошибка создания устройства DirectX 11");
+            return false;
+        }
+        TestAssimp();
+        // Получаем back buffer
+        ID3D11Texture2D* backBuffer = nullptr;
+        hr = swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&backBuffer);
+        if (FAILED(hr)) {
+            DEBUG_ERROR("Ошибка получения back buffer");
+            return false;
+        }
+
+        // Создаем render target view
+        hr = device->CreateRenderTargetView(backBuffer, nullptr, &renderTargetView);
+        backBuffer->Release();
+        if (FAILED(hr)) {
+            DEBUG_ERROR("Ошибка создания render target view");
+            return false;
+        }
+
+        // Создаем depth stencil buffer
+        D3D11_TEXTURE2D_DESC depthDesc = {};
+        depthDesc.Width = width;
+        depthDesc.Height = height;
+        depthDesc.MipLevels = 1;
+        depthDesc.ArraySize = 1;
+        depthDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        depthDesc.SampleDesc.Count = 1;
+        depthDesc.SampleDesc.Quality = 0;
+        depthDesc.Usage = D3D11_USAGE_DEFAULT;
+        depthDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+
+        ID3D11Texture2D* depthBuffer = nullptr;
+        hr = device->CreateTexture2D(&depthDesc, nullptr, &depthBuffer);
+        if (FAILED(hr)) {
+            DEBUG_ERROR("Ошибка создания depth buffer");
+            return false;
+        }
+
+        // Создаем depth stencil view
+        D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
+        dsvDesc.Format = depthDesc.Format;
+        dsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+        dsvDesc.Texture2D.MipSlice = 0;
+
+        hr = device->CreateDepthStencilView(depthBuffer, &dsvDesc, &depthStencilView);
+        depthBuffer->Release();
+        if (FAILED(hr)) {
+            DEBUG_ERROR("Ошибка создания depth stencil view");
+            return false;
+        }
+
+        // Настраиваем viewport
+        viewport.Width = (float)width;
+        viewport.Height = (float)height;
+        viewport.MinDepth = 0.0f;
+        viewport.MaxDepth = 1.0f;
+        viewport.TopLeftX = 0;
+        viewport.TopLeftY = 0;
+
+        DEBUG_SUCCESS("DirectX 11 инициализирован");
+        return true;
+    }
+    void TestAssimp() {
+        Assimp::Importer importer;
+
+        const aiScene* scene = importer.ReadFile(
+            "C:/dev/GameDev/animation/Walking.fbx",
+            aiProcess_Triangulate |
+            aiProcess_JoinIdenticalVertices |
+            aiProcess_LimitBoneWeights |
+            aiProcess_CalcTangentSpace
+        );
+
+        if (!scene) {
+            DEBUG_ERROR(importer.GetErrorString());
+            return;
+        }
+
+        DEBUG_SUCCESS("Assimp FBX загружен успешно!");
+
+        if (scene->HasAnimations()) {
+            DEBUG_LOG("FBX содержит анимации");
+        }
+        else {
+            DEBUG_WARNING("FBX без анимаций");
+        }
+    }
+
+    void BeginFrame() {
+        float clearColor[4] = { 0.1f, 0.2f, 0.3f, 1.0f }; // Темно-синий фон
+
+        // Очищаем back buffer и depth buffer
+        context->ClearRenderTargetView(renderTargetView, clearColor);
+        context->ClearDepthStencilView(depthStencilView, D3D11_CLEAR_DEPTH, 1.0f, 0);
+
+        // Устанавливаем render target и depth stencil
+        context->OMSetRenderTargets(1, &renderTargetView, depthStencilView);
+        context->RSSetViewports(1, &viewport);
+    }
+
+    void EndFrame() {
+        swapChain->Present(1, 0);
+    }
+
+    ID3D11Device* GetDevice() { return device; }
+    ID3D11DeviceContext* GetContext() { return context; }
+
+    void Cleanup() {
+        if (depthStencilView) depthStencilView->Release();
+        if (renderTargetView) renderTargetView->Release();
+        if (swapChain) swapChain->Release();
+        if (context) context->Release();
+        if (device) device->Release();
+    }
+};
+
+// ==================== WINDOW ====================
+LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_DESTROY:
+        DEBUG_LOG("Окно закрывается...");
+        PostQuitMessage(0);
+        break;
+
+    case WM_SIZE: {
+        int width = LOWORD(lParam);
+        int height = HIWORD(lParam);
+        char buffer[128];
+        sprintf_s(buffer, "Размер окна изменен: %dx%d", width, height);
+        DEBUG_LOG(buffer);
+        break;
+    }
+
+    default:
+        return DefWindowProc(hwnd, msg, wParam, lParam);
+    }
+    return 0;
 }
 
-// ==================== ОСТАЛЬНЫЕ ФУНКЦИИ ====================
-
-int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
-    _In_ LPSTR lpCmdLine, _In_ int nCmdShow)
-{
-    INITCOMMONCONTROLSEX icc = { sizeof(INITCOMMONCONTROLSEX), ICC_STANDARD_CLASSES };
-    InitCommonControlsEx(&icc);
-
-    const wchar_t CLASS_NAME[] = L"ShadowsOverTheThamesClass";
-
+HWND CreateGameWindow(HINSTANCE hInstance, int width, int height) {
     WNDCLASS wc = {};
     wc.lpfnWndProc = WindowProc;
     wc.hInstance = hInstance;
-    wc.lpszClassName = CLASS_NAME;
+    wc.lpszClassName = L"IsometricGameWindow";
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
-    wc.style = CS_HREDRAW | CS_VREDRAW;
-    wc.hbrBackground = CreateSolidBrush(MENU_BG_COLOR);
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
 
-    if (!RegisterClass(&wc))
-    {
-        MessageBox(nullptr, L"Не удалось зарегистрировать класс окна", L"Ошибка", MB_OK | MB_ICONERROR);
-        return 1;
-    }
+    RegisterClass(&wc);
 
-    g_window.hWnd = CreateWindowEx(
-        0,
-        CLASS_NAME,
-        L"Shadows Over The Thames",
-        WS_POPUP | WS_VISIBLE,
-        0, 0,
-        GetSystemMetrics(SM_CXSCREEN),
-        GetSystemMetrics(SM_CYSCREEN),
-        nullptr,
-        nullptr,
-        hInstance,
-        nullptr
+    HWND hwnd = CreateWindow(
+        L"IsometricGameWindow",
+        L"Shadows Over The Thames - Изометрический прототип с поддержкой MTL (WASD - движение, Стрелки - камера, R - сброс, 1/2/3/4 - масштаб)",
+        WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT, CW_USEDEFAULT,
+        width, height,
+        nullptr, nullptr, hInstance, nullptr
     );
 
-    if (!g_window.hWnd)
-    {
-        MessageBox(nullptr, L"Не удалось создать окно", L"Ошибка", MB_OK | MB_ICONERROR);
+    return hwnd;
+}
+
+// ==================== MAIN ====================
+int WINAPI WinMain(
+    _In_ HINSTANCE hInstance,
+    _In_opt_ HINSTANCE hPrevInstance,
+    _In_ LPSTR lpCmdLine,
+    _In_ int nCmdShow)
+{
+    DEBUG_LOG("=== ЗАПУСК ИЗОМЕТРИЧЕСКОЙ ИГРЫ ===");
+
+    // Выводим информацию о системе
+    DEBUG_LOG("Системная информация:");
+    DEBUG_LOG("  Windows версия: проверяется...");
+
+    // Создаем окно
+    HWND hwnd = CreateGameWindow(hInstance, SCREEN_WIDTH, SCREEN_HEIGHT);
+    if (!hwnd) {
+        MessageBox(nullptr, L"Ошибка создания окна", L"Ошибка", MB_OK | MB_ICONERROR);
         return 1;
     }
 
-    RECT clientRect;
-    GetClientRect(g_window.hWnd, &clientRect);
-    g_window.width = clientRect.right - clientRect.left;
-    g_window.height = clientRect.bottom - clientRect.top;
+    ShowWindow(hwnd, nCmdShow);
+    UpdateWindow(hwnd);
 
-    CreateMainMenuButtons();
+    // Инициализируем рендерер
+    DX11Renderer renderer;
+    if (!renderer.Initialize(hwnd, SCREEN_WIDTH, SCREEN_HEIGHT)) {
+        MessageBox(hwnd, L"Ошибка инициализации DirectX 11", L"Ошибка", MB_OK | MB_ICONERROR);
+        return 1;
+    }
 
-    ShowWindow(g_window.hWnd, nCmdShow);
-    UpdateWindow(g_window.hWnd);
+    // Инициализируем игровую сцену
+    GameScene game;
+    if (!game.Initialize(renderer.GetDevice(), renderer.GetContext())) {
+        MessageBox(hwnd, L"Ошибка инициализации игры", L"Ошибка", MB_OK | MB_ICONERROR);
+        renderer.Cleanup();
+        return 1;
+    }
 
-    SetTimer(g_window.hWnd, 1, 16, NULL);
+    // Инициализируем таймер
+    LARGE_INTEGER frequency, lastTime;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&lastTime);
 
+    float deltaTime = 0.0f;
+    float totalTime = 0.0f;
+    int frameCount = 0;
+
+    DEBUG_LOG("=== ИГРА ЗАПУЩЕНА ===");
+    DEBUG_LOG("Управление:");
+    DEBUG_LOG("  W - Северо-запад");
+    DEBUG_LOG("  S - Юго-восток");
+    DEBUG_LOG("  A - Юго-запад");
+    DEBUG_LOG("  D - Северо-восток");
+    DEBUG_LOG("  Стрелки - вращение и зум камеры");
+    DEBUG_LOG("  R - Сброс позиции");
+    DEBUG_LOG("  1/2/3/4 - Изменение масштаба (особенно важно для моделей из Blender!)");
+    DEBUG_LOG("  ESC - Выход");
+    DEBUG_LOG("ВАЖНО: Модели из Blender обычно очень большие,");
+    DEBUG_LOG("поэтому начинаем с масштаба 0.001 и увеличиваем при необходимости");
+
+    // Главный игровой цикл
     MSG msg = {};
-    while (!g_window.should_exit)
-    {
-        if (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE))
-        {
-            if (msg.message == WM_QUIT)
-                g_window.should_exit = true;
+    while (true) {
+
+        if (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) break;
 
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }
-        else
-        {
-            if (g_gameState.inGame)
-            {
-                ProcessInput();
-                UpdateGameLogic();
-                InvalidateRect(g_window.hWnd, nullptr, FALSE);
-            }
-            Sleep(1);
-        }
-    }
-
-    Cleanup();
-    return 0;
-}
-
-void CreateMainMenuButtons()
-{
-    HINSTANCE hInstance = (HINSTANCE)GetWindowLongPtr(g_window.hWnd, GWLP_HINSTANCE);
-
-    DWORD buttonStyle = WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON | BS_FLAT;
-
-    g_window.hStartButton = CreateWindow(
-        L"BUTTON",
-        L"НАЧАТЬ ИГРУ",
-        buttonStyle,
-        g_window.width / 2 - 150,
-        g_window.height / 2 - 35,
-        300, 70,
-        g_window.hWnd,
-        (HMENU)1001,
-        hInstance,
-        nullptr
-    );
-
-    g_window.hExitButton = CreateWindow(
-        L"BUTTON",
-        L"ВЫЙТИ",
-        buttonStyle,
-        g_window.width / 2 - 100,
-        g_window.height / 2 + 55,
-        200, 50,
-        g_window.hWnd,
-        (HMENU)1002,
-        hInstance,
-        nullptr
-    );
-
-    CustomizeButton(g_window.hStartButton);
-    CustomizeButton(g_window.hExitButton);
-}
-
-void CustomizeButton(HWND hwndButton)
-{
-    HFONT hFont = CreateFont(
-        24,
-        0,
-        0,
-        0,
-        FW_BOLD,
-        FALSE,
-        FALSE,
-        FALSE,
-        DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS,
-        CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY,
-        DEFAULT_PITCH | FF_DONTCARE,
-        L"Segoe UI"
-    );
-
-    if (hFont)
-    {
-        SendMessage(hwndButton, WM_SETFONT, (WPARAM)hFont, TRUE);
-    }
-
-    SetWindowLongPtr(hwndButton, GWL_EXSTYLE,
-        GetWindowLongPtr(hwndButton, GWL_EXSTYLE) & ~WS_EX_TRANSPARENT);
-}
-
-void ShowMainMenuButtons(bool show)
-{
-    if (g_window.hStartButton && IsWindow(g_window.hStartButton))
-        ShowWindow(g_window.hStartButton, show ? SW_SHOW : SW_HIDE);
-
-    if (g_window.hExitButton && IsWindow(g_window.hExitButton))
-        ShowWindow(g_window.hExitButton, show ? SW_SHOW : SW_HIDE);
-}
-
-HBITMAP LoadBmpFromDebug(const char* filename)
-{
-    char exePath[MAX_PATH];
-    GetModuleFileNameA(nullptr, exePath, MAX_PATH);
-
-    char debugMsg[512];
-    sprintf_s(debugMsg, "=== Поиск файла: %s ===\n", filename);
-    OutputDebugStringA(debugMsg);
-
-    std::string exeDir = exePath;
-    size_t pos = exeDir.find_last_of("\\/");
-    if (pos != std::string::npos)
-    {
-        exeDir = exeDir.substr(0, pos + 1);
-    }
-
-    sprintf_s(debugMsg, "Папка EXE: %s\n", exeDir.c_str());
-    OutputDebugStringA(debugMsg);
-
-    std::string paths[] = {
-        exeDir + filename,
-        exeDir + "Debug\\" + filename,
-        exeDir + "x64\\Debug\\" + filename,
-        exeDir + "..\\" + filename,
-        filename
-    };
-
-    for (const auto& fullPath : paths)
-    {
-        sprintf_s(debugMsg, "Пробуем: %s\n", fullPath.c_str());
-        OutputDebugStringA(debugMsg);
-
-        HBITMAP hBitmap = (HBITMAP)LoadImageA(
-            nullptr,
-            fullPath.c_str(),
-            IMAGE_BITMAP,
-            0, 0,
-            LR_LOADFROMFILE | LR_CREATEDIBSECTION
-        );
-
-        if (hBitmap)
-        {
-            sprintf_s(debugMsg, "✓ УСПЕХ! Загружен: %s\n", fullPath.c_str());
-            OutputDebugStringA(debugMsg);
-            return hBitmap;
-        }
-        else
-        {
-            DWORD err = GetLastError();
-            sprintf_s(debugMsg, "✗ Ошибка: %lu\n", err);
-            OutputDebugStringA(debugMsg);
-        }
-    }
-
-    sprintf_s(debugMsg, "✗ Файл не найден ни в одном из мест: %s\n", filename);
-    OutputDebugStringA(debugMsg);
-    return nullptr;
-}
-
-void RenderMainMenu(HDC hdc)
-{
-    if (!g_window.hBufferDC || g_window.bufferWidth != g_window.width || g_window.bufferHeight != g_window.height)
-    {
-        InitBuffer(hdc);
-    }
-
-    HDC bufferDC = g_window.hBufferDC;
-
-    HBRUSH background = CreateSolidBrush(MENU_BG_COLOR);
-    RECT fullRect = { 0, 0, g_window.width, g_window.height };
-    FillRect(bufferDC, &fullRect, background);
-    DeleteObject(background);
-
-    SetBkMode(bufferDC, TRANSPARENT);
-
-    LOGFONT lf = {};
-    lf.lfHeight = 72;
-    lf.lfWeight = FW_BOLD;
-    lf.lfItalic = TRUE;
-    wcscpy_s(lf.lfFaceName, L"Georgia");
-
-    HFONT titleFont = CreateFontIndirect(&lf);
-    HFONT oldFont = (HFONT)SelectObject(bufferDC, titleFont);
-
-    SetTextColor(bufferDC, RGB(220, 180, 100));
-
-    std::wstring title = L"SHADOWS OVER THE THAMES";
-    RECT titleRect = { 0, 100, g_window.width, 250 };
-    DrawText(bufferDC, title.c_str(), -1, &titleRect, DT_CENTER | DT_SINGLELINE);
-
-    lf.lfHeight = 28;
-    lf.lfWeight = FW_NORMAL;
-    lf.lfItalic = FALSE;
-    wcscpy_s(lf.lfFaceName, L"Segoe UI");
-
-    HFONT subtitleFont = CreateFontIndirect(&lf);
-    SelectObject(bufferDC, subtitleFont);
-
-    SetTextColor(bufferDC, RGB(180, 180, 200));
-
-    std::wstring subtitle = L"Приключенческая игра!";
-    RECT subtitleRect = { 0, 200, g_window.width, 300 };
-    DrawText(bufferDC, subtitle.c_str(), -1, &subtitleRect, DT_CENTER | DT_SINGLELINE);
-
-    lf.lfHeight = 20;
-    HFONT infoFont = CreateFontIndirect(&lf);
-    SelectObject(bufferDC, infoFont);
-
-    SetTextColor(bufferDC, RGB(150, 150, 180));
-
-    std::wstring info = L"Нажмите кнопку 'НАЧАТЬ ИГРУ' чтобы начать";
-    RECT infoRect = { 0, g_window.height - 100, g_window.width, g_window.height - 50 };
-    DrawText(bufferDC, info.c_str(), -1, &infoRect, DT_CENTER | DT_SINGLELINE);
-
-    SelectObject(bufferDC, oldFont);
-    DeleteObject(titleFont);
-    DeleteObject(subtitleFont);
-    DeleteObject(infoFont);
-
-    BitBlt(hdc, 0, 0, g_window.width, g_window.height, bufferDC, 0, 0, SRCCOPY);
-}
-
-void LoadWalkAnimation(Player& player, const std::vector<std::string>& rightFiles, DWORD frameDelay)
-{
-    player.walkAnimation.Clear();
-    player.walkAnimation.frameDelay = frameDelay;
-
-    for (const auto& filename : rightFiles) {
-        HBITMAP frame = LoadBmpFromDebug(filename.c_str());
-        if (frame) {
-            player.walkAnimation.frames.push_back(frame);
-        }
-    }
-
-    player.walkAnimation.loaded = !player.walkAnimation.frames.empty();
-
-    if (!player.walkAnimation.frames.empty()) {
-        player.hSpriteRight = player.walkAnimation.frames[0];
-    }
-}
-
-void LoadRunAnimation(Player& player, const std::vector<std::string>& rightFiles, DWORD frameDelay)
-{
-    player.runAnimation.Clear();
-    player.runAnimation.frameDelay = frameDelay;
-
-    for (const auto& filename : rightFiles) {
-        HBITMAP frame = LoadBmpFromDebug(filename.c_str());
-        if (frame) {
-            player.runAnimation.frames.push_back(frame);
-        }
-    }
-
-    player.runAnimation.loaded = !player.runAnimation.frames.empty();
-
-    if (!player.runAnimation.frames.empty()) {
-        player.hSpriteRunRight = player.runAnimation.frames[0];
-    }
-}
-
-void LoadIdleAnimation(Player& player, const std::vector<std::string>& rightFiles, DWORD frameDelay)
-{
-    player.idleAnimation.Clear();
-    player.idleAnimation.frameDelay = frameDelay;
-
-    for (const auto& filename : rightFiles) {
-        HBITMAP frame = LoadBmpFromDebug(filename.c_str());
-        if (frame) {
-            player.idleAnimation.frames.push_back(frame);
-        }
-    }
-
-    player.idleAnimation.loaded = !player.idleAnimation.frames.empty();
-
-    if (!player.idleAnimation.frames.empty()) {
-        player.hSpriteRight = player.idleAnimation.frames[0];
-    }
-}
-
-void OnStartGame()
-{
-    g_gameState.inMainMenu = false;
-    g_gameState.inGame = true;
-    g_gameState.currentLevel = 1;
-
-    ShowMainMenuButtons(false);
-    InitLevel1();
-    InvalidateRect(g_window.hWnd, nullptr, TRUE);
-    PlayBackgroundMusic("x64\\Debug\\bazar.wav");
-}
-
-void OnExitGame()
-{
-    g_window.should_exit = true;
-    PostQuitMessage(0);
-}
-
-void InitLevel1()
-{
-    OutputDebugStringA("=== ИНИЦИАЛИЗАЦИЯ УРОВНЯ 1 ===\n");
-
-    // Загружаем врага
-    LoadEnemy(g_gameState.enemy);
-
-    // Загружаем ресурсы боя
-    LoadBattleResources();
-
-    // Загрузка фона
-    g_gameState.hLevelBackground = LoadBmpFromDebug("level1.bmp");
-    if (g_gameState.hLevelBackground) {
-        OutputDebugStringA("Фон уровня загружен успешно\n");
-    }
-    else {
-        OutputDebugStringA("Не удалось загрузить фон уровня\n");
-    }
-
-    // Загрузка анимаций
-    std::vector<std::string> idleFrames = {
-        "player_idle_1.bmp",
-        "player_idle_2.bmp",
-        "player_idle_3.bmp",
-        "player_idle_4.bmp",
-        "player_idle_5.bmp",
-        "player_idle_6.bmp"
-    };
-    LoadIdleAnimation(g_gameState.player, idleFrames, 200);
-    OutputDebugStringA("Idle анимация загружена\n");
-
-    // ЗАГРУЗКА ПОРТРЕТА ИГРОКА
-    OutputDebugStringA("Пробуем загрузить player_portrait_smoking.bmp...\n");
-    g_gameState.playerPortrait = LoadBmpFromDebug("player_portrait_smoking.bmp");
-
-    if (g_gameState.playerPortrait) {
-        OutputDebugStringA("Портрет игрока загружен успешно!\n");
-
-        BITMAP bm;
-        if (GetObject(g_gameState.playerPortrait, sizeof(BITMAP), &bm)) {
-            char debugMsg[512];
-            sprintf_s(debugMsg, "Размер портрета: %dx%d, бит на пиксель: %d\n",
-                bm.bmWidth, bm.bmHeight, bm.bmBitsPixel);
-            OutputDebugStringA(debugMsg);
-        }
-    }
-    else {
-        OutputDebugStringA("Не удалось загрузить портрет игрока. Создаем временный...\n");
-
-        g_gameState.playerPortrait = CreatePortrait(180, 200,
-            RGB(60, 40, 20),
-            RGB(255, 220, 180),
-            RGB(0, 150, 200),
-            L"neutral");
-
-        if (g_gameState.playerPortrait) {
-            OutputDebugStringA("Временный портрет создан успешно\n");
-        }
         else {
-            OutputDebugStringA("Не удалось создать временный портрет!\n");
-        }
-    }
+            // Вычисляем deltaTime
+            LARGE_INTEGER currentTime;
+            QueryPerformanceCounter(&currentTime);
+            deltaTime = (float)(currentTime.QuadPart - lastTime.QuadPart) / frequency.QuadPart;
+            lastTime = currentTime;
 
-    // Продолжение загрузки...
-    std::vector<std::string> walkFrames = {
-        "player_walking_1.bmp",
-        "player_walking_2.bmp",
-        "player_walking_3.bmp",
-        "player_walking_4.bmp",
-        "player_walking_5.bmp",
-        "player_walking_6.bmp",
-        "player_walking_7.bmp",
-        "player_walking_8.bmp"
-    };
-    LoadWalkAnimation(g_gameState.player, walkFrames, 120);
-    OutputDebugStringA("Walk анимация загружена\n");
+            // Ограничиваем deltaTime для стабильности
+            if (deltaTime > 0.1f) deltaTime = 0.1f;
 
-    std::vector<std::string> runFrames = {
-        "player_running_1.bmp",
-        "player_running_2.bmp",
-        "player_running_3.bmp",
-        "player_running_4.bmp",
-        "player_running_5.bmp",
-        "player_running_6.bmp",
-        "player_running_7.bmp",
-        "player_running_8.bmp"
-    };
-    LoadRunAnimation(g_gameState.player, runFrames, 80);
-    OutputDebugStringA("Run анимация загружена\n");
+            // Обновляем игру
+            game.Update(deltaTime);
 
-    // Инициализация игрока
-    g_gameState.player.x = 500;
-    g_gameState.player.y = g_gameState.levelHeight - 300;
-    g_gameState.player.facingRight = true;
-    g_gameState.player.isIdle = true;
+            // Рендерим
+            renderer.BeginFrame();
 
-    // Инициализация камеры
-    g_gameState.cameraX = 0;
-    g_gameState.cameraY = 0;
+            float aspectRatio = (float)SCREEN_WIDTH / SCREEN_HEIGHT;
+            game.Render(aspectRatio);
 
-    // Таймеры анимации
-    DWORD currentTime = GetTickCount();
-    g_gameState.player.idleAnimation.lastUpdateTime = currentTime;
-    g_gameState.player.walkAnimation.lastUpdateTime = currentTime;
-    g_gameState.player.runAnimation.lastUpdateTime = currentTime;
-    g_gameState.player.idleTimer = currentTime;
+            renderer.EndFrame();
 
-    // Инициализация диалогового окна
-    g_gameState.dialog.x = 100;
-    g_gameState.dialog.y = g_window.height - 280;
-    g_gameState.dialog.width = g_window.width - 200;
-    g_gameState.dialog.height = 250;
-
-    // Создаем портрет NPC
-    g_gameState.npcPortrait = CreatePortrait(180, 200,
-        RGB(180, 180, 180),
-        RGB(255, 200, 160),
-        RGB(200, 100, 50),
-        L"happy");
-
-    OutputDebugStringA("=== ИНИЦИАЛИЗАЦИЯ УРОВНЯ 1 ЗАВЕРШЕНА ===\n");
-}
-
-LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
-{
-    switch (uMsg)
-    {
-    case WM_COMMAND:
-        switch (LOWORD(wParam))
-        {
-        case 1001: // Начать игру
-            OnStartGame();
-            break;
-        case 1002: // Выйти
-            OnExitGame();
-            break;
-        }
-        break;
-
-    case WM_SIZE:
-        g_window.width = LOWORD(lParam);
-        g_window.height = HIWORD(lParam);
-
-        if (g_gameState.inMainMenu)
-        {
-            if (g_window.hStartButton && IsWindow(g_window.hStartButton))
-            {
-                SetWindowPos(g_window.hStartButton, nullptr,
-                    g_window.width / 2 - 150,
-                    g_window.height / 2 - 35,
-                    300, 70, SWP_NOZORDER);
+            // Статистика FPS
+            totalTime += deltaTime;
+            frameCount++;
+            if (totalTime >= 1.0f) {
+                char fpsBuffer[64];
+                sprintf_s(fpsBuffer, "FPS: %d", frameCount);
+                DEBUG_LOG(fpsBuffer);
+                totalTime = 0.0f;
+                frameCount = 0;
             }
 
-            if (g_window.hExitButton && IsWindow(g_window.hExitButton))
-            {
-                SetWindowPos(g_window.hExitButton, nullptr,
-                    g_window.width / 2 - 100,
-                    g_window.height / 2 + 55,
-                    200, 50, SWP_NOZORDER);
+            // Проверяем выход
+            if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) {
+                PostQuitMessage(0);
             }
         }
-
-        if (g_window.hBufferDC)
-        {
-            HDC hdc = GetDC(hwnd);
-            InitBuffer(hdc);
-            ReleaseDC(hwnd, hdc);
-        }
-
-        InvalidateRect(hwnd, nullptr, TRUE);
-        break;
-
-    case WM_TIMER:
-        if (g_gameState.inGame)
-        {
-            ProcessInput();
-            UpdateGameLogic();
-            InvalidateRect(hwnd, nullptr, FALSE);
-        }
-        break;
-
-    case WM_PAINT:
-    {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hwnd, &ps);
-
-        if (g_gameState.inMainMenu)
-        {
-            RenderMainMenu(hdc);
-        }
-        else if (g_gameState.inGame)
-        {
-            RenderGame(hdc);
-        }
-
-        EndPaint(hwnd, &ps);
-        break;
     }
 
-    case WM_KEYDOWN:
-        if (wParam == VK_ESCAPE)
-        {
-            if (g_gameState.inGame)
-            {
-                g_gameState.inGame = false;
-                g_gameState.inMainMenu = true;
-                StopBackgroundMusic();
-                ShowMainMenuButtons(true);
-                InvalidateRect(hwnd, nullptr, TRUE);
-            }
-            else
-            {
-                OnExitGame();
-            }
-        }
-        else if (wParam == VK_SPACE)  // ДИАЛОГИ
-        {
-            if (IsDialogActive()) {
-                NextDialogLine();
-                InvalidateRect(hwnd, nullptr, TRUE);
-            }
-            else {
-                // Тестовый диалог при нажатии Space
-                if (g_gameState.inGame && !IsDialogActive()) {
-                    std::vector<DialogLine> testDialog;
+    // Очистка
+    DEBUG_LOG("=== ЗАВЕРШЕНИЕ ===");
+    game.Cleanup();
+    renderer.Cleanup();
 
-                    DialogLine line1;
-                    line1.speaker = L"АЛЕКС ХЭМПТОН";
-                    line1.text = L"Еще одна ночь в объятиях лондонского кошмара. 'Кровавая Кукла'... Пять лет прошло, а твой почерк все так же свеж на стенах моей памяти. (добавить в размышление деталей то, что он видит на фотографии, дополнить контекст происходящего, немного расширить для игрока лорную часть и это добавит эмоциональной глубины) Кто ты? Призрак? Маньяк? Или... нечто большее?";
-                    line1.speakerFace = g_gameState.playerPortrait;
-                    testDialog.push_back(line1);
+    DEBUG_LOG("Игра завершена");
 
-                    StartDialogSequence(testDialog);
-                    InvalidateRect(hwnd, nullptr, TRUE);
-                }
-            }
-        }
-        break;
-
-    case WM_DESTROY:
-        KillTimer(hwnd, 1);
-        PostQuitMessage(0);
-        break;
-
-    case WM_ERASEBKGND:
-        return 1;
-    }
-
-    return DefWindowProc(hwnd, uMsg, wParam, lParam);
-}
-
-void Cleanup()
-{
-    StopBackgroundMusic();
-    CleanupBuffer();
-
-    g_gameState.player.Cleanup();
-
-    // Очищаем ресурсы боя
-    if (g_gameState.battle.background) {
-        DeleteObject(g_gameState.battle.background);
-    }
-    if (g_gameState.battle.player.battleSprite &&
-        g_gameState.battle.player.battleSprite != g_gameState.player.GetCurrentSprite()) {
-        DeleteObject(g_gameState.battle.player.battleSprite);
-    }
-    if (g_gameState.battle.enemy.battleSprite &&
-        g_gameState.battle.enemy.battleSprite != g_gameState.enemy.idleSprite) {
-        DeleteObject(g_gameState.battle.enemy.battleSprite);
-    }
-
-    // Очищаем ресурсы врага
-    if (g_gameState.enemy.idleSprite) {
-        DeleteObject(g_gameState.enemy.idleSprite);
-    }
-    g_gameState.enemy.idleAnimation.Clear();
-
-    // Очищаем диалоговые ресурсы
-    if (g_gameState.playerPortrait) {
-        DeleteObject(g_gameState.playerPortrait);
-    }
-    if (g_gameState.npcPortrait) {
-        DeleteObject(g_gameState.npcPortrait);
-    }
-
-    if (g_window.hStartButton && IsWindow(g_window.hStartButton))
-    {
-        HFONT hFont = (HFONT)SendMessage(g_window.hStartButton, WM_GETFONT, 0, 0);
-        if (hFont) DeleteObject(hFont);
-    }
-
-    if (g_window.hExitButton && IsWindow(g_window.hExitButton))
-    {
-        HFONT hFont = (HFONT)SendMessage(g_window.hExitButton, WM_GETFONT, 0, 0);
-        if (hFont) DeleteObject(hFont);
-    }
-
-    if (g_gameState.hLevelBackground) DeleteObject(g_gameState.hLevelBackground);
-    if (g_gameState.player.hSpriteRight) DeleteObject(g_gameState.player.hSpriteRight);
-    if (g_gameState.player.hSpriteRunRight &&
-        g_gameState.player.hSpriteRunRight != g_gameState.player.hSpriteRight)
-    {
-        DeleteObject(g_gameState.player.hSpriteRunRight);
-    }
+    return (int)msg.wParam;
 }
